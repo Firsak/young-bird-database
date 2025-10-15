@@ -1,0 +1,14 @@
+[package]
+name = "young_bird_database"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# Binary targets
+# Files in src/bin/ are automatically detected as binaries
+# You can optionally configure them here for more control:
+#
+# [[bin]]
+# name = "test_create_new_pages"
+# path = "src/bin/test_create_new_pages.rs"
