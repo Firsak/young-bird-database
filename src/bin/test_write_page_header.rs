@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _ = file_processing::writing::write_new_page(filename, 1, page_kbytes);
     let _ = file_processing::writing::write_new_page(filename, 2, page_kbytes);
 
-    let page_header: PageHeader = PageHeader::new(11, 11, 8888);
+    let page_header: PageHeader = PageHeader::new(11, 11, 0, 8888, 0);
     let _ = file_processing::writing::write_page_header(filename, 1, page_header, page_kbytes);
 
     let read_res_0 = file_processing::reading::read_page(filename, 0, page_kbytes)?;

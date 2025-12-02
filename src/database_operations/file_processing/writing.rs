@@ -1,12 +1,13 @@
 use std::error::Error;
+use std::fmt::format;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::database_operations::file_processing::table::{
-    PageHeader, PageRecord, PageRecordContent,
+    PageHeader, PageRecordMetadata, PageRecordContent,
 };
-use crate::database_operations::file_processing::traits::BinarySerde;
-use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_SIZE};
+use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
 
 pub fn write_page_header(
     filename: &str,
@@ -29,21 +30,7 @@ pub fn write_page_header(
 
     let size: usize = page_kbytes * KBYTES;
 
-    let _ = match file.seek(SeekFrom::Start(page_number * (size as u64))) {
-        Ok(pos) => pos,
-        Err(error) => {
-            println!("Error seeking in the file {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
-
-    match file.write_all(&page_header.to_bytes()) {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            println!("Error writing to the file {filename}: {error}");
-            Err(Box::new(error))
-        }
-    }
+    page_header.write_to_file(&mut file, page_number * (size as u64), filename)
 }
 
 pub fn write_new_page(
@@ -65,23 +52,9 @@ pub fn write_new_page(
     };
 
     let size: usize = page_kbytes * KBYTES;
-    let header = PageHeader::new(page_number, 0, (size - HEADER_SIZE) as u16);
+    let header = PageHeader::new(page_number, 0, 0, (size - HEADER_SIZE) as u16, 0);
 
-    let _ = match file.seek(SeekFrom::Start(page_number * (size as u64))) {
-        Ok(pos) => pos,
-        Err(error) => {
-            println!("Error seeking in the file {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
-
-    match file.write_all(&header.to_bytes()) {
-        Ok(_) => (),
-        Err(error) => {
-            println!("Error writing to the file {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
+    header.write_to_file(&mut file, page_number * (size as u64), filename)?;
 
     let pos = ((page_kbytes * KBYTES) as u64) * (page_number + 1) - 1;
     let _ = match file.seek(SeekFrom::Start(pos)) {
@@ -125,70 +98,257 @@ pub fn add_new_record(
     let page_size: usize = page_kbytes * KBYTES;
     let page_pos = page_number * (page_size as u64);
 
-    let _ = match file.seek(SeekFrom::Start(page_pos)) {
-        Ok(pos) => pos,
-        Err(error) => {
-            println!("Error seeking in the file {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
+    let mut page_header = PageHeader::read_from_file(
+        &mut file,
+        page_number * (page_size as u64),
+        page_size,
+        filename,
+    )?;
 
-    let mut buffer: Vec<u8> = vec![0u8; page_size];
-    let page_header = match file.read_exact(&mut buffer) {
-        Ok(_) => PageHeader::from_bytes(&(buffer[0..HEADER_SIZE]))?,
-        Err(error) => {
-            println!("Error reading page header {page_number} in {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
-
-    let next_record = page_header.get_records_count();
-    let next_record_pos =
-        page_pos + (HEADER_SIZE as u64) + (next_record as u64) * (PAGE_RECORD_SIZE as u64);
-    let content_bytes = record_content.to_bytes();
-    let content_length = content_bytes.len();
-    let content_pos = if next_record_pos == 0 {
-        (page_size as u64) - 1 - (content_length as u64)
+    let next_record_metadata_index = page_header.get_records_count();
+    let next_record_metadata_pos =
+        page_pos + (HEADER_SIZE as u64) + (next_record_metadata_index as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
+    let record_content_bytes = record_content.to_bytes();
+    let record_content_length = record_content_bytes.len();
+    let record_content_pos = if next_record_metadata_index == 0 {
+        (page_size as u64) - (record_content_length as u64)
     } else {
-        panic!("Adding record > 0 is not implemented")
+        let last_record_metadata_pos = page_pos
+            + (HEADER_SIZE as u64)
+            + ((page_header.get_records_count() - 1) as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
+        let last_record_metadata =
+            PageRecordMetadata::read_from_file(&mut file, last_record_metadata_pos, PAGE_RECORD_METADATE_SIZE, filename)?;
+        (last_record_metadata.get_bytes_offset() as u64) - (record_content_length as u64)
     };
 
-    if content_length + PAGE_RECORD_SIZE > page_header.get_free_space() as usize {
-        panic!("The behaviour when there is not enough bytes is not implemented");
+    if record_content_length + PAGE_RECORD_METADATE_SIZE > page_header.get_free_space() as usize {
+        return Err("Not enough bytes to write in this page".into());
     };
 
-    let record = PageRecord::new(record_id, content_pos as u32, content_length as u32);
-    let record_bytes = record.to_bytes();
+    let record_metadata = PageRecordMetadata::new(record_id, record_content_pos as u32, record_content_length as u32, false);
 
-    let _ = match file.seek(SeekFrom::Start(next_record_pos)) {
-        Ok(pos) => pos,
+    record_metadata.write_to_file(&mut file, next_record_metadata_pos, filename)?;
+
+    record_content.write_to_file(&mut file, page_pos + record_content_pos, filename)?;
+
+    page_header.update_records_count(page_header.get_records_count() + 1);
+    page_header.update_free_space(
+        page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATE_SIZE) as u16,
+    );
+
+    page_header.write_to_file(&mut file, page_number * (page_size as u64), filename)?;
+
+    Ok(())
+}
+
+fn find_record_metadata_by_id(
+    file_ref: &mut std::fs::File,
+    filename: &str,
+    page_number: u64,
+    page_size: usize,
+    record_id: u64,
+    page_header: &PageHeader,
+) -> Result<(Option<PageRecordMetadata>, Option<u16>), Box<dyn Error>> {
+    let mut found_record_metadata_index: Option<u16> = None;
+    let mut found_record_metadata: Option<PageRecordMetadata> = None;
+
+    for index in 0..page_header.get_records_count() {
+        let record_metadata_pos = page_number * page_size as u64
+            + HEADER_SIZE as u64
+            + (index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+        let record_metadata = PageRecordMetadata::read_from_file(file_ref, record_metadata_pos, PAGE_RECORD_METADATE_SIZE, filename)?;
+        if record_metadata.get_id() == record_id {
+            found_record_metadata = Some(record_metadata);
+            found_record_metadata_index = Some(index);
+            break;
+        }
+    }
+
+    Ok((found_record_metadata, found_record_metadata_index))
+}
+
+pub fn delete_record(
+    filename: &str,
+    page_number: u64,
+    page_kbytes: usize,
+    record_id: u64,
+) -> Result<(), Box<dyn Error>> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(filename)
+    {
+        Ok(file) => file,
         Err(error) => {
-            println!("Error seeking for record position in the file {filename}: {error}");
+            println!("Error opening or creating the file {filename}: {error}");
             return Err(Box::new(error));
         }
     };
 
-    match file.write_all(&record_bytes) {
-        Ok(_) => (),
+    let page_size: usize = page_kbytes * KBYTES;
+    let page_header_pos: u64 = page_number * (page_size as u64);
+
+    let mut page_header =
+        PageHeader::read_from_file(&mut file, page_header_pos, page_size, filename)?;
+
+    let res = find_record_metadata_by_id(
+        &mut file,
+        filename,
+        page_number,
+        page_size,
+        record_id,
+        &page_header,
+    )?;
+
+    let found_record_metadata = res.0;
+    let found_record_metadata_index = res.1;
+
+    if found_record_metadata.is_none() || found_record_metadata_index.is_none() {
+        return Err(Box::from(
+            format!("No PageRecordMetadata found with provided record_id {}", record_id).to_string(),
+        ));
+    }
+
+    let found_record_metadata_index = found_record_metadata_index.unwrap();
+    let mut found_record_metadata = found_record_metadata.unwrap();
+
+    let page_records_count = page_header.get_records_count();
+
+    if found_record_metadata_index == (page_records_count - 1) {
+        page_header.update_records_count(page_records_count - 1);
+        page_header.update_free_space(
+            page_header.get_free_space()
+                + found_record_metadata.get_bytes_content() as u16
+                + PAGE_RECORD_METADATE_SIZE as u16,
+        );
+        page_header.write_to_file(&mut file, page_header_pos, filename)
+    } else {
+        page_header.update_records_count(page_records_count - 1);
+        page_header.update_deleted_records_count(page_header.get_deleted_records_count() + 1);
+        page_header.update_fragmented_space(
+            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u16,
+        );
+
+        found_record_metadata.set_is_deleted(true);
+        let record_metadata_pos = page_number * page_size as u64
+            + HEADER_SIZE as u64
+            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+        found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)?;
+
+        page_header.write_to_file(&mut file, page_header_pos, filename)
+    }
+}
+
+pub fn update_record(
+    filename: &str,
+    page_number: u64,
+    page_kbytes: usize,
+    record_id: u64,
+    record_content: PageRecordContent,
+) -> Result<(), Box<dyn Error>> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(filename)
+    {
+        Ok(file) => file,
         Err(error) => {
-            println!("Error writing record to the file {filename}: {error}");
+            println!("Error opening or creating the file {filename}: {error}");
             return Err(Box::new(error));
         }
     };
 
-    let _ = match file.seek(SeekFrom::Start(page_pos + content_pos)) {
-        Ok(pos) => pos,
-        Err(error) => {
-            println!("Error seeking for record content position in the file {filename}: {error}");
-            return Err(Box::new(error));
-        }
-    };
+    let page_size: usize = page_kbytes * KBYTES;
+    let page_header_pos: u64 = page_number * (page_size as u64);
 
-    match file.write_all(&record_bytes) {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            println!("Error writing record content to the file {filename}: {error}");
-            Err(Box::new(error))
+    let mut page_header =
+        PageHeader::read_from_file(&mut file, page_header_pos, page_size, filename)?;
+
+    let res = find_record_metadata_by_id(
+        &mut file,
+        filename,
+        page_number,
+        page_size,
+        record_id,
+        &page_header,
+    )?;
+
+    let found_record_metadata = res.0;
+    let found_record_metadata_index = res.1;
+
+    if found_record_metadata.is_none() || found_record_metadata_index.is_none() {
+        return Err(Box::from(
+            format!("No PageRecordMetadata found with provided record_id {}", record_id).to_string(),
+        ));
+    }
+
+    let found_record_metadata_index = found_record_metadata_index.unwrap();
+    let mut found_record_metadata = found_record_metadata.unwrap();
+
+    let page_records_count = page_header.get_records_count();
+    let old_record_content_length = found_record_metadata.get_bytes_content();
+    let new_record_content_length = record_content.to_bytes().len();
+    let page_pos = page_number * (page_size as u64);
+
+    if old_record_content_length as usize >= new_record_content_length {
+        record_content.write_to_file(
+            &mut file,
+            page_pos + found_record_metadata.get_bytes_offset() as u64,
+            filename,
+        )?;
+        let record_content_length_difference =
+            found_record_metadata.get_bytes_content() as usize - new_record_content_length;
+        if found_record_metadata_index == (page_records_count - 1) {
+            page_header
+                .update_free_space(page_header.get_free_space() + record_content_length_difference as u16);
+        } else {
+            page_header.update_fragmented_space(
+                page_header.get_fragment_space() + record_content_length_difference as u16,
+            );
         }
+
+        let record_metadata_pos = page_number * page_size as u64
+            + HEADER_SIZE as u64
+            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+        found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)?;
+
+        page_header.write_to_file(&mut file, page_header_pos, filename)
+    } else {
+        if new_record_content_length > page_header.get_free_space() as usize {
+            // Need to create logic to delete record here and create on another page
+            return Err(Box::from(format!(
+                "Not enough space in page {} to update record {}", page_number, record_id).to_string(),
+            ));
+        }
+
+        page_header.update_fragmented_space(
+            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u16,
+        );
+        page_header
+            .update_free_space(page_header.get_free_space() - new_record_content_length as u16);
+        page_header.write_to_file(&mut file, page_header_pos, filename)?;
+
+        let last_record_metadata_pos = page_pos
+            + (HEADER_SIZE as u64)
+            + ((page_header.get_records_count() - 1) as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
+        let last_record_metadata =
+            PageRecordMetadata::read_from_file(&mut file, last_record_metadata_pos, PAGE_RECORD_METADATE_SIZE, filename)?;
+        let new_record_content_pos =
+            (last_record_metadata.get_bytes_offset() as u64) - (new_record_content_length as u64);
+
+        found_record_metadata.set_bytes_content(new_record_content_length as u32);
+        found_record_metadata.set_bytes_offset(new_record_content_pos as u32);
+
+        record_content.write_to_file(&mut file, page_pos + new_record_content_pos, filename)?;
+
+        let record_metadata_pos = page_number * page_size as u64
+            + HEADER_SIZE as u64
+            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+
+        found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)
     }
 }

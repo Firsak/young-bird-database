@@ -1,4 +1,8 @@
-use crate::database_operations::file_processing::PAGE_RECORD_SIZE;
+use std::error::Error;
+use std::io::{Read, Seek, SeekFrom, Write};
+
+use crate::database_operations::file_processing::traits::ReadWrite;
+use crate::database_operations::file_processing::PAGE_RECORD_METADATE_SIZE;
 
 use super::traits::BinarySerde;
 use super::types::{ColumnTypes, ContentTypes};
@@ -7,14 +11,14 @@ use super::HEADER_SIZE;
 #[derive(Debug)]
 pub struct Page {
     pub header: PageHeader,
-    records: Vec<PageRecord>,
+    records: Vec<PageRecordMetadata>,
     records_content: Vec<PageRecordContent>,
 }
 
 impl Page {
     pub fn new(
         header: PageHeader,
-        records: Vec<PageRecord>,
+        records: Vec<PageRecordMetadata>,
         records_content: Vec<PageRecordContent>,
     ) -> Self {
         Self {
@@ -23,22 +27,37 @@ impl Page {
             records_content,
         }
     }
+
+    pub fn append_record(&mut self, record: PageRecordMetadata, record_content: PageRecordContent) {
+        self.records.extend([record]);
+        self.records_content.insert(0, record_content);
+    }
 }
 
 #[derive(Debug)]
 pub struct PageHeader {
     // 12 bytes
-    page_id: u64,       // 8 bytes
-    records_count: u16, // 2 bytes
-    free_space: u16,    // 2 bytes
+    page_id: u64,          // 8 bytes
+    records_count: u16,    // 2 bytes
+    deleted_count: u16,    // 2 bytes
+    free_space: u16,       // 2 bytes
+    fragmented_space: u16, // 2 bytes
 }
 
 impl PageHeader {
-    pub fn new(page_id: u64, records_count: u16, free_space: u16) -> Self {
+    pub fn new(
+        page_id: u64,
+        records_count: u16,
+        deleted_count: u16,
+        free_space: u16,
+        fragmented_space: u16,
+    ) -> Self {
         Self {
             page_id,
             records_count,
+            deleted_count,
             free_space,
+            fragmented_space,
         }
     }
 
@@ -46,16 +65,32 @@ impl PageHeader {
         self.records_count
     }
 
+    pub fn get_deleted_records_count(&self) -> u16 {
+        self.deleted_count
+    }
+
     pub fn get_free_space(&self) -> u16 {
         self.free_space
     }
 
-    pub fn update_records_count(&mut self, new_count: u16) -> () {
+    pub fn get_fragment_space(&self) -> u16 {
+        self.fragmented_space
+    }
+
+    pub fn update_records_count(&mut self, new_count: u16) {
         self.records_count = new_count;
     }
 
-    pub fn update_free_space(&mut self, new_space: u16) -> () {
+    pub fn update_deleted_records_count(&mut self, new_count: u16) {
+        self.deleted_count = new_count;
+    }
+
+    pub fn update_free_space(&mut self, new_space: u16) {
         self.free_space = new_space;
+    }
+
+    pub fn update_fragmented_space(&mut self, new_space: u16) {
+        self.fragmented_space = new_space;
     }
 }
 
@@ -71,8 +106,10 @@ impl BinarySerde for PageHeader {
         bytes[0..8].copy_from_slice(&self.page_id.to_le_bytes());
         // Bytes 8-9: records_count (u16)
         bytes[8..10].copy_from_slice(&self.records_count.to_le_bytes());
-        // Bytes 10-11: free_space (u16)
-        bytes[10..12].copy_from_slice(&self.free_space.to_le_bytes());
+        bytes[10..12].copy_from_slice(&self.deleted_count.to_le_bytes());
+        // Bytes 12-13: free_space (u16)
+        bytes[12..14].copy_from_slice(&self.free_space.to_le_bytes());
+        bytes[14..16].copy_from_slice(&self.fragmented_space.to_le_bytes());
         bytes
     }
 
@@ -91,43 +128,128 @@ impl BinarySerde for PageHeader {
         let page_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         // Extract records_count from bytes 8-9
         let records_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        // Extract free_space from bytes 10-11
-        let free_space = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
+        let deleted_count = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
+        // Extract free_space from bytes 12-13
+        let free_space = u16::from_le_bytes(bytes[12..14].try_into().unwrap());
+        let fragmented_space = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
 
         Ok(Self {
             page_id,
             records_count,
+            deleted_count,
             free_space,
+            fragmented_space,
         })
     }
 }
 
-#[derive(Debug)]
-pub struct PageRecord {
-    // 16 bytes
-    id: u64,            // 8 bytes
-    bytes_offset: u32,  // 4 bytes
-    bytes_content: u32, // 4 bytes
-}
+impl ReadWrite for PageHeader {
+    type RWError = Box<dyn Error>;
 
-impl PageRecord {
-    pub fn new(id: u64, bytes_offset: u32, bytes_content: u32) -> Self {
-        Self {
-            id,
-            bytes_offset,
-            bytes_content,
+    fn write_to_file(
+        &self,
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        filename: &str,
+    ) -> Result<(), Self::RWError> {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        match file.write_all(&self.to_bytes()) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                println!("Error writing page header to the file {filename}: {error}");
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    fn read_from_file(
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        size: usize,
+        filename: &str,
+    ) -> Result<Self, Self::RWError>
+    where
+        Self: Sized,
+    {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        let mut buffer: Vec<u8> = vec![0u8; size];
+        match file.read_exact(&mut buffer) {
+            Ok(_) => Ok(PageHeader::from_bytes(&(buffer[0..HEADER_SIZE]))?),
+            Err(error) => {
+                println!("Error reading page header at pos {start_pos_bytes} (look for you page size) in {filename}: {error}");
+                Err(Box::new(error))
+            }
         }
     }
 }
 
-impl BinarySerde for PageRecord {
-    type Output = [u8; PAGE_RECORD_SIZE]; // Fixed size array
+#[derive(Debug)]
+pub struct PageRecordMetadata {
+    // 16 bytes
+    id: u64,            // 8 bytes
+    bytes_offset: u32,  // 4 bytes
+    bytes_content: u32, // 4 bytes
+    is_deleted: bool,   // 1 bytes
+}
+
+impl PageRecordMetadata {
+    pub fn new(id: u64, bytes_offset: u32, bytes_content: u32, is_deleted: bool) -> Self {
+        Self {
+            id,
+            bytes_offset,
+            bytes_content,
+            is_deleted,
+        }
+    }
+
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn get_bytes_offset(&self) -> u32 {
+        self.bytes_offset
+    }
+
+    pub fn get_bytes_content(&self) -> u32 {
+        self.bytes_content
+    }
+
+    pub fn set_is_deleted(&mut self, is_deleted: bool) {
+        self.is_deleted = is_deleted;
+    }
+
+    pub fn set_bytes_content(&mut self, new_bytes_content_length: u32) {
+        self.bytes_content = new_bytes_content_length;
+    }
+
+    pub fn set_bytes_offset(&mut self, new_bytes_offset: u32) {
+        self.bytes_offset = new_bytes_offset;
+    }
+}
+
+impl BinarySerde for PageRecordMetadata {
+    type Output = [u8; PAGE_RECORD_METADATE_SIZE]; // Fixed size array
 
     fn to_bytes(&self) -> Self::Output {
-        let mut bytes = [0u8; PAGE_RECORD_SIZE];
+        let mut bytes = [0u8; PAGE_RECORD_METADATE_SIZE];
         bytes[0..8].copy_from_slice(&self.id.to_le_bytes());
         bytes[8..12].copy_from_slice(&self.bytes_offset.to_le_bytes());
         bytes[12..16].copy_from_slice(&self.bytes_content.to_le_bytes());
+        bytes[16..17].copy_from_slice(&[if self.is_deleted { 1u8 } else { 0u8 }]);
         bytes
     }
 
@@ -135,22 +257,80 @@ impl BinarySerde for PageRecord {
         if bytes.is_empty() {
             return Err("PageRecord deserialization failed: byte slice is empty".to_string());
         }
-        if bytes.len() != PAGE_RECORD_SIZE {
+        if bytes.len() != PAGE_RECORD_METADATE_SIZE {
             return Err(format!(
                 "PageRecord deserialization failed: expected exactly {} bytes (8 for id + 4 for bytes_offset + 4 for bytes_content), got {} bytes",
-                PAGE_RECORD_SIZE, bytes.len()
+                PAGE_RECORD_METADATE_SIZE, bytes.len()
             ));
         }
 
         let id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let bytes_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         let bytes_content = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let is_deleted = bytes[16] == 1u8;
 
         Ok(Self {
             id,
             bytes_offset,
             bytes_content,
+            is_deleted,
         })
+    }
+}
+
+impl ReadWrite for PageRecordMetadata {
+    type RWError = Box<dyn Error>;
+
+    fn write_to_file(
+        &self,
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        filename: &str,
+    ) -> Result<(), Self::RWError> {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        match file.write_all(&self.to_bytes()) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                println!("Error writing page record to the file {filename}: {error}");
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    fn read_from_file(
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        size: usize,
+        filename: &str,
+    ) -> Result<Self, Self::RWError>
+    where
+        Self: Sized,
+    {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        let mut buffer: Vec<u8> = vec![0u8; size];
+        match file.read_exact(&mut buffer) {
+            Ok(_) => Ok(PageRecordMetadata::from_bytes(&(buffer))?),
+            Err(error) => {
+                println!(
+                    "Error reading page record at pos {start_pos_bytes} in {filename}: {error}"
+                );
+                Err(Box::new(error))
+            }
+        }
     }
 }
 
@@ -212,6 +392,62 @@ impl BinarySerde for PageRecordContent {
         }
 
         Ok(Self { content })
+    }
+}
+
+impl ReadWrite for PageRecordContent {
+    type RWError = Box<dyn Error>;
+
+    fn write_to_file(
+        &self,
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        filename: &str,
+    ) -> Result<(), Self::RWError> {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        match file.write_all(&self.to_bytes()) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                println!("Error writing page record content to the file {filename}: {error}");
+                Err(Box::new(error))
+            }
+        }
+    }
+
+    fn read_from_file(
+        file: &mut std::fs::File,
+        start_pos_bytes: u64,
+        size: usize,
+        filename: &str,
+    ) -> Result<Self, Self::RWError>
+    where
+        Self: Sized,
+    {
+        let _ = match file.seek(SeekFrom::Start(start_pos_bytes)) {
+            Ok(pos) => pos,
+            Err(error) => {
+                println!("Error seeking in the file {filename}: {error}");
+                return Err(Box::new(error));
+            }
+        };
+
+        let mut buffer: Vec<u8> = vec![0u8; size];
+        match file.read_exact(&mut buffer) {
+            Ok(_) => Ok(PageRecordContent::from_bytes(&(buffer))?),
+            Err(error) => {
+                println!(
+                    "Error reading page record at pos {start_pos_bytes} in {filename}: {error}"
+                );
+                Err(Box::new(error))
+            }
+        }
     }
 }
 
