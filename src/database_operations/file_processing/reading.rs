@@ -11,7 +11,7 @@ use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECO
 pub fn read_page_header(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
 ) -> Result<PageHeader, Box<dyn Error>> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
@@ -21,7 +21,7 @@ pub fn read_page_header(
         }
     };
 
-    let size: usize = page_kbytes * KBYTES;
+    let size: usize = page_kbytes as usize * KBYTES;
 
     PageHeader::read_from_file(&mut file, page_number * (size as u64), size, filename)
 }
@@ -29,7 +29,7 @@ pub fn read_page_header(
 pub fn read_page(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
 ) -> Result<Page, Box<dyn Error>> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
@@ -39,7 +39,7 @@ pub fn read_page(
         }
     };
 
-    let size: usize = page_kbytes * KBYTES;
+    let size: usize = page_kbytes as usize * KBYTES;
     let _ = match file.seek(SeekFrom::Start(page_number * (size as u64))) {
         Ok(pos) => pos,
         Err(error) => {
@@ -87,7 +87,7 @@ pub fn read_record_metadata(
     filename: &str,
     page_number: u64,
     record_metadata_index: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
 ) -> Result<PageRecordMetadata, Box<dyn Error>> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
@@ -97,7 +97,7 @@ pub fn read_record_metadata(
         }
     };
 
-    let size: usize = page_kbytes * KBYTES;
+    let size: usize = page_kbytes as usize * KBYTES;
     let record_metadata_pos: u64 = page_number * (size as u64)
         + (HEADER_SIZE as u64)
         + (PAGE_RECORD_METADATE_SIZE as u64 * record_metadata_index);

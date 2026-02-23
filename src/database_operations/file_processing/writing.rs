@@ -13,7 +13,7 @@ pub fn write_page_header(
     filename: &str,
     page_number: u64,
     page_header: PageHeader,
-    page_kbytes: usize,
+    page_kbytes: u32,
 ) -> Result<(), Box<dyn Error>> {
     let mut file = match OpenOptions::new()
         .write(true)
@@ -28,7 +28,7 @@ pub fn write_page_header(
         }
     };
 
-    let size: usize = page_kbytes * KBYTES;
+    let size: usize = page_kbytes as usize * KBYTES;
 
     page_header.write_to_file(&mut file, page_number * (size as u64), filename)
 }
@@ -36,7 +36,7 @@ pub fn write_page_header(
 pub fn write_new_page(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
 ) -> Result<(), Box<dyn Error>> {
     let mut file = match OpenOptions::new()
         .write(true)
@@ -51,12 +51,12 @@ pub fn write_new_page(
         }
     };
 
-    let size: usize = page_kbytes * KBYTES;
-    let header = PageHeader::new(page_number, 0, 0, (size - HEADER_SIZE) as u16, 0);
+    let size: usize = page_kbytes as usize * KBYTES;
+    let header = PageHeader::new(page_number, 0, 0, (size - HEADER_SIZE) as u32, 0);
 
     header.write_to_file(&mut file, page_number * (size as u64), filename)?;
 
-    let pos = ((page_kbytes * KBYTES) as u64) * (page_number + 1) - 1;
+    let pos = (size as u64) * (page_number + 1) - 1;
     let _ = match file.seek(SeekFrom::Start(pos)) {
         Ok(pos) => pos,
         Err(error) => {
@@ -77,7 +77,7 @@ pub fn write_new_page(
 pub fn add_new_record(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
     record_id: u64,
     record_content: PageRecordContent,
 ) -> Result<(), Box<dyn Error>> {
@@ -95,7 +95,7 @@ pub fn add_new_record(
         }
     };
 
-    let page_size: usize = page_kbytes * KBYTES;
+    let page_size: usize = page_kbytes as usize * KBYTES;
     let page_pos = page_number * (page_size as u64);
 
     let mut page_header = PageHeader::read_from_file(
@@ -133,7 +133,7 @@ pub fn add_new_record(
 
     page_header.update_records_count(page_header.get_records_count() + 1);
     page_header.update_free_space(
-        page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATE_SIZE) as u16,
+        page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATE_SIZE) as u32,
     );
 
     page_header.write_to_file(&mut file, page_number * (page_size as u64), filename)?;
@@ -170,7 +170,7 @@ fn find_record_metadata_by_id(
 pub fn delete_record(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
     record_id: u64,
 ) -> Result<(), Box<dyn Error>> {
     let mut file = match OpenOptions::new()
@@ -187,7 +187,7 @@ pub fn delete_record(
         }
     };
 
-    let page_size: usize = page_kbytes * KBYTES;
+    let page_size: usize = page_kbytes as usize * KBYTES;
     let page_header_pos: u64 = page_number * (page_size as u64);
 
     let mut page_header =
@@ -220,15 +220,15 @@ pub fn delete_record(
         page_header.update_records_count(page_records_count - 1);
         page_header.update_free_space(
             page_header.get_free_space()
-                + found_record_metadata.get_bytes_content() as u16
-                + PAGE_RECORD_METADATE_SIZE as u16,
+                + found_record_metadata.get_bytes_content() as u32
+                + PAGE_RECORD_METADATE_SIZE as u32,
         );
         page_header.write_to_file(&mut file, page_header_pos, filename)
     } else {
         page_header.update_records_count(page_records_count - 1);
         page_header.update_deleted_records_count(page_header.get_deleted_records_count() + 1);
         page_header.update_fragmented_space(
-            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u16,
+            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u32,
         );
 
         found_record_metadata.set_is_deleted(true);
@@ -244,7 +244,7 @@ pub fn delete_record(
 pub fn update_record(
     filename: &str,
     page_number: u64,
-    page_kbytes: usize,
+    page_kbytes: u32,
     record_id: u64,
     record_content: PageRecordContent,
 ) -> Result<(), Box<dyn Error>> {
@@ -262,7 +262,7 @@ pub fn update_record(
         }
     };
 
-    let page_size: usize = page_kbytes * KBYTES;
+    let page_size: usize = page_kbytes as usize * KBYTES;
     let page_header_pos: u64 = page_number * (page_size as u64);
 
     let mut page_header =
@@ -304,10 +304,10 @@ pub fn update_record(
             found_record_metadata.get_bytes_content() as usize - new_record_content_length;
         if found_record_metadata_index == (page_records_count - 1) {
             page_header
-                .update_free_space(page_header.get_free_space() + record_content_length_difference as u16);
+                .update_free_space(page_header.get_free_space() + record_content_length_difference as u32);
         } else {
             page_header.update_fragmented_space(
-                page_header.get_fragment_space() + record_content_length_difference as u16,
+                page_header.get_fragment_space() + record_content_length_difference as u32,
             );
         }
 
@@ -326,10 +326,10 @@ pub fn update_record(
         }
 
         page_header.update_fragmented_space(
-            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u16,
+            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u32,
         );
         page_header
-            .update_free_space(page_header.get_free_space() - new_record_content_length as u16);
+            .update_free_space(page_header.get_free_space() - new_record_content_length as u32);
         page_header.write_to_file(&mut file, page_header_pos, filename)?;
 
         let last_record_metadata_pos = page_pos

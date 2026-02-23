@@ -4,7 +4,7 @@ use young_bird_database::database_operations::file_processing::{self, table::Pag
 
 fn main() -> Result<(), Box<dyn Error>> {
     let filename = "test_db_page_header.dat";
-    let page_kbytes = file_processing::KBYTES * 8;
+    let page_kbytes: u32 = 8;
     let page_number = 3;
     let page_write_res =
         file_processing::writing::write_new_page(filename, page_number, page_kbytes);
@@ -31,11 +31,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _ = file_processing::writing::write_page_header(filename, 1, page_header, page_kbytes);
 
     let read_res_0 = file_processing::reading::read_page(filename, 0, page_kbytes)?;
-    let read_res_1 = file_processing::reading::read_page(filename, 1, page_kbytes)?;
+    let read_res_1 = file_processing::reading::read_page_header(filename, 1, page_kbytes)?;
     let read_res_2 = file_processing::reading::read_page(filename, 2, page_kbytes)?;
 
     println!("{read_res_0:?}");
-    println!("{read_res_1:?}");
+    println!("Page 1 header (overwritten): {read_res_1:?}");
     println!("{read_res_2:?}");
 
     return Ok(());

@@ -36,12 +36,12 @@ impl Page {
 
 #[derive(Debug)]
 pub struct PageHeader {
-    // 12 bytes
+    // 20 bytes
     page_id: u64,          // 8 bytes
     records_count: u16,    // 2 bytes
     deleted_count: u16,    // 2 bytes
-    free_space: u16,       // 2 bytes
-    fragmented_space: u16, // 2 bytes
+    free_space: u32,       // 4 bytes
+    fragmented_space: u32, // 4 bytes
 }
 
 impl PageHeader {
@@ -49,8 +49,8 @@ impl PageHeader {
         page_id: u64,
         records_count: u16,
         deleted_count: u16,
-        free_space: u16,
-        fragmented_space: u16,
+        free_space: u32,
+        fragmented_space: u32,
     ) -> Self {
         Self {
             page_id,
@@ -69,11 +69,11 @@ impl PageHeader {
         self.deleted_count
     }
 
-    pub fn get_free_space(&self) -> u16 {
+    pub fn get_free_space(&self) -> u32 {
         self.free_space
     }
 
-    pub fn get_fragment_space(&self) -> u16 {
+    pub fn get_fragment_space(&self) -> u32 {
         self.fragmented_space
     }
 
@@ -85,11 +85,11 @@ impl PageHeader {
         self.deleted_count = new_count;
     }
 
-    pub fn update_free_space(&mut self, new_space: u16) {
+    pub fn update_free_space(&mut self, new_space: u32) {
         self.free_space = new_space;
     }
 
-    pub fn update_fragmented_space(&mut self, new_space: u16) {
+    pub fn update_fragmented_space(&mut self, new_space: u32) {
         self.fragmented_space = new_space;
     }
 }
@@ -97,19 +97,20 @@ impl PageHeader {
 impl BinarySerde for PageHeader {
     type Output = [u8; HEADER_SIZE]; // Fixed size array
 
-    /// Serializes the PageHeader into a 12-byte array in little-endian format.
-    /// Memory layout: [page_id: 8 bytes][records_count: 2 bytes][free_space: 2 bytes]
-    /// Uses copy_from_slice for efficient memcpy operation.
+    /// Serializes the PageHeader into a 20-byte array in little-endian format.
+    /// Memory layout: [page_id: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
     fn to_bytes(&self) -> Self::Output {
         let mut bytes = [0u8; HEADER_SIZE];
         // Bytes 0-7: page_id (u64)
         bytes[0..8].copy_from_slice(&self.page_id.to_le_bytes());
         // Bytes 8-9: records_count (u16)
         bytes[8..10].copy_from_slice(&self.records_count.to_le_bytes());
+        // Bytes 10-11: deleted_count (u16)
         bytes[10..12].copy_from_slice(&self.deleted_count.to_le_bytes());
-        // Bytes 12-13: free_space (u16)
-        bytes[12..14].copy_from_slice(&self.free_space.to_le_bytes());
-        bytes[14..16].copy_from_slice(&self.fragmented_space.to_le_bytes());
+        // Bytes 12-15: free_space (u32)
+        bytes[12..16].copy_from_slice(&self.free_space.to_le_bytes());
+        // Bytes 16-19: fragmented_space (u32)
+        bytes[16..20].copy_from_slice(&self.fragmented_space.to_le_bytes());
         bytes
     }
 
@@ -119,7 +120,7 @@ impl BinarySerde for PageHeader {
         }
         if bytes.len() != HEADER_SIZE {
             return Err(format!(
-                "PageHeader deserialization failed: expected exactly {} bytes (8 for page_id + 2 for records_count + 2 for free_space), got {} bytes",
+                "PageHeader deserialization failed: expected exactly {} bytes (8 for page_id + 2 for records_count + 2 for deleted_count + 4 for free_space + 4 for fragmented_space), got {} bytes",
                 HEADER_SIZE, bytes.len()
             ));
         }
@@ -128,10 +129,12 @@ impl BinarySerde for PageHeader {
         let page_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         // Extract records_count from bytes 8-9
         let records_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+        // Extract deleted_count from bytes 10-11
         let deleted_count = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
-        // Extract free_space from bytes 12-13
-        let free_space = u16::from_le_bytes(bytes[12..14].try_into().unwrap());
-        let fragmented_space = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
+        // Extract free_space from bytes 12-15
+        let free_space = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        // Extract fragmented_space from bytes 16-19
+        let fragmented_space = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
 
         Ok(Self {
             page_id,
@@ -524,14 +527,14 @@ impl BinarySerde for ColumnDef {
 
 #[derive(Debug)]
 pub struct TableHeader {
-    // 16 bytes + columns_count * dynamic bytes
+    // 10 bytes + columns_count * dynamic bytes
     pages_count: u64,       // 8 bytes
-    columns_count: u64,     // 8 bytes
+    columns_count: u16,     // 2 bytes
     header: Vec<ColumnDef>, // columns_count * dynamic bytes
 }
 
 impl TableHeader {
-    pub fn new(pages_count: u64, columns_count: u64, header: Vec<ColumnDef>) -> Self {
+    pub fn new(pages_count: u64, columns_count: u16, header: Vec<ColumnDef>) -> Self {
         Self {
             pages_count,
             columns_count,
@@ -558,17 +561,17 @@ impl BinarySerde for TableHeader {
         if bytes.is_empty() {
             return Err("TableHeader deserialization failed: byte slice is empty".to_string());
         }
-        if bytes.len() <= 16 {
+        if bytes.len() <= 10 {
             return Err(format!(
-                "TableHeader deserialization failed: expected at least {} bytes, got {} bytes",
-                16,
+                "TableHeader deserialization failed: expected at least {} bytes (8 for pages_count + 2 for columns_count), got {} bytes",
+                10,
                 bytes.len()
             ));
         }
 
         let pages_count = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let columns_count = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-        let mut current_total: usize = 16;
+        let columns_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+        let mut current_total: usize = 10;
         let mut header: Vec<ColumnDef> = vec![];
         for _ in 0..columns_count {
             let len =

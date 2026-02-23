@@ -4,7 +4,7 @@ use young_bird_database::database_operations::file_processing::{self};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let filename = "test_db_page.dat";
-    let page_kbytes = file_processing::KBYTES * 8;
+    let page_kbytes: u32 = 8;
     let page_number = 3;
     let page_write_res =
         file_processing::writing::write_new_page(filename, page_number, page_kbytes);
