@@ -1,6 +1,6 @@
 use super::traits::BinarySerde;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ContentTypes {
     Null,          //  0
     Boolean(bool), //  1
@@ -17,7 +17,7 @@ pub enum ContentTypes {
     Float64(f64),  // 12
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ColumnTypes {
     Boolean, //  0
     Text,    //  1
@@ -356,5 +356,190 @@ impl BinarySerde for ContentTypes {
                 invalid
             )),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// This block only compiles when running `cargo test`.
+// `use super::*` imports everything from the parent scope
+// (ColumnTypes, ContentTypes, BinarySerde) so tests can use them.
+// ─────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ══════════════════════════════════════════════════════════
+    // ColumnTypes tests
+    // ══════════════════════════════════════════════════════════
+
+    // EXAMPLE TEST — shows the pattern for all roundtrip tests:
+    // 1. Create a value
+    // 2. Serialize it with to_bytes()
+    // 3. Deserialize it back with from_bytes()
+    // 4. Assert the result matches the original
+    #[test]
+    fn column_types_boolean_roundtrip() {
+        let original = ColumnTypes::Boolean;
+        let bytes = original.to_bytes(); // serialize: should produce [0]
+        assert_eq!(bytes, [0]); // verify raw bytes are correct
+        let restored = ColumnTypes::from_bytes(&bytes).unwrap(); // deserialize back
+        assert_eq!(restored.to_bytes(), [0]); // verify it matches
+    }
+
+    // Test that ALL ColumnTypes variants survive to_bytes -> from_bytes.
+    // Hint: create each variant, serialize, deserialize, then compare
+    // the tag bytes. You can check all 12 variants in one test.
+    #[test]
+    fn column_types_all_variants_roundtrip() {
+        // TODO(human): Test all ColumnTypes variants (Text, Int8, Int16, etc.)
+        // For each variant:
+        //   1. let bytes = ColumnTypes::Text.to_bytes();
+        //   2. let restored = ColumnTypes::from_bytes(&bytes).unwrap();
+        //   3. assert_eq!(restored.to_bytes(), bytes);
+        let all_colum_types = [
+            ColumnTypes::Boolean, //  0
+            ColumnTypes::Text,    //  1
+            ColumnTypes::Int8,    //  2
+            ColumnTypes::Int16,   //  3
+            ColumnTypes::Int32,   //  4
+            ColumnTypes::Int64,   //  5
+            ColumnTypes::UInt8,   //  6
+            ColumnTypes::UInt16,  //  7
+            ColumnTypes::UInt32,  //  8
+            ColumnTypes::UInt64,  //  9
+            ColumnTypes::Float32, // 10
+            ColumnTypes::Float64, // 11
+        ];
+        let all_numbers_serde: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+        for (col_type, number) in all_colum_types.iter().zip(all_numbers_serde.iter()) {
+            assert_eq!(col_type.to_bytes(), [*number]);
+            assert_eq!(
+                col_type.to_bytes(),
+                ColumnTypes::from_bytes(&[*number]).unwrap().to_bytes()
+            );
+        }
+    }
+
+    // Test that from_bytes rejects invalid input.
+    // from_bytes returns Result<Self, String> — use .is_err() to check it fails.
+    #[test]
+    fn column_types_invalid_tag() {
+        let result = ColumnTypes::from_bytes(&[255]);
+        assert!(result.is_err()); // should fail: 255 is not a valid tag (0-11)
+    }
+
+    #[test]
+    fn column_types_empty_bytes() {
+        let result = ColumnTypes::from_bytes(&[]);
+        assert!(result.is_err()); // should fail: empty input
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // ContentTypes tests
+    // ══════════════════════════════════════════════════════════
+
+    // Helper: serialize then deserialize, assert full byte-level roundtrip
+    fn assert_content_roundtrip(value: ContentTypes) {
+        let bytes = value.to_bytes();
+        let restored_bytes = ContentTypes::from_bytes(&bytes).unwrap().to_bytes();
+        assert_eq!(bytes, restored_bytes);
+    }
+
+    #[test]
+    fn content_null_roundtrip() {
+        let bytes = ContentTypes::Null.to_bytes();
+        assert_eq!(bytes, vec![0]);
+        assert_content_roundtrip(ContentTypes::Null);
+    }
+
+    #[test]
+    fn content_boolean_roundtrip() {
+        assert_eq!(ContentTypes::Boolean(true).to_bytes(), [1, 1]);
+        assert_eq!(ContentTypes::Boolean(false).to_bytes(), [1, 0]);
+        assert_content_roundtrip(ContentTypes::Boolean(true));
+        assert_content_roundtrip(ContentTypes::Boolean(false));
+    }
+
+    #[test]
+    fn content_text_roundtrip() {
+        let bytes = ContentTypes::Text("Hello world!".to_string()).to_bytes();
+
+        // Verify binary format: [tag][is_file_stored][length LE][utf8]
+        assert_eq!(bytes[0], 2);
+        assert_eq!(bytes[1], 0);
+        assert_eq!(bytes[2..6], 12u32.to_le_bytes());
+        assert_eq!(&bytes[6..], b"Hello world!");
+
+        assert_content_roundtrip(ContentTypes::Text("Hello world!".to_string()));
+    }
+
+    #[test]
+    fn content_text_empty_string() {
+        let bytes = ContentTypes::Text("".to_string()).to_bytes();
+
+        assert_eq!(bytes[0], 2);
+        assert_eq!(bytes[1], 0);
+        assert_eq!(bytes[2..6], 0u32.to_le_bytes());
+        assert_eq!(bytes.len(), 6); // no string bytes after the header
+
+        assert_content_roundtrip(ContentTypes::Text("".to_string()));
+    }
+
+    #[test]
+    fn content_integers_roundtrip() {
+        // Signed types: test zero, min, max
+        assert_content_roundtrip(ContentTypes::Int8(0));
+        assert_content_roundtrip(ContentTypes::Int8(i8::MIN));
+        assert_content_roundtrip(ContentTypes::Int8(i8::MAX));
+        assert_content_roundtrip(ContentTypes::Int16(i16::MIN));
+        assert_content_roundtrip(ContentTypes::Int16(i16::MAX));
+        assert_content_roundtrip(ContentTypes::Int32(i32::MIN));
+        assert_content_roundtrip(ContentTypes::Int32(i32::MAX));
+        assert_content_roundtrip(ContentTypes::Int64(i64::MIN));
+        assert_content_roundtrip(ContentTypes::Int64(i64::MAX));
+
+        // Unsigned types: test zero, max
+        assert_content_roundtrip(ContentTypes::UInt8(0));
+        assert_content_roundtrip(ContentTypes::UInt8(u8::MAX));
+        assert_content_roundtrip(ContentTypes::UInt16(u16::MAX));
+        assert_content_roundtrip(ContentTypes::UInt32(u32::MAX));
+        assert_content_roundtrip(ContentTypes::UInt64(u64::MAX));
+    }
+
+    #[test]
+    fn content_floats_roundtrip() {
+        assert_content_roundtrip(ContentTypes::Float32(3.14));
+        assert_content_roundtrip(ContentTypes::Float32(0.0));
+        assert_content_roundtrip(ContentTypes::Float32(f32::MIN));
+        assert_content_roundtrip(ContentTypes::Float32(f32::MAX));
+        assert_content_roundtrip(ContentTypes::Float64(2.71828));
+        assert_content_roundtrip(ContentTypes::Float64(0.0));
+        assert_content_roundtrip(ContentTypes::Float64(f64::MIN));
+        assert_content_roundtrip(ContentTypes::Float64(f64::MAX));
+    }
+
+    #[test]
+    fn content_invalid_tag() {
+        assert!(ContentTypes::from_bytes(&[99]).is_err());
+        assert!(ContentTypes::from_bytes(&[255]).is_err());
+        assert!(ContentTypes::from_bytes(&[13]).is_err()); // one past last valid tag (12)
+    }
+
+    #[test]
+    fn content_empty_bytes() {
+        assert!(ContentTypes::from_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn content_wrong_byte_count() {
+        // Boolean: expects exactly 2 bytes
+        assert!(ContentTypes::from_bytes(&[1, 0, 0]).is_err());
+        // Int8: expects exactly 2 bytes
+        assert!(ContentTypes::from_bytes(&[3, 0, 0]).is_err());
+        // Int32: expects exactly 5 bytes
+        assert!(ContentTypes::from_bytes(&[5, 0, 0]).is_err());
+        // Null: expects exactly 1 byte
+        assert!(ContentTypes::from_bytes(&[0, 0]).is_err());
     }
 }

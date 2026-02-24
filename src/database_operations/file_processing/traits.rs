@@ -15,12 +15,13 @@ pub trait ReadWrite {
     fn write_to_file(
         &self,
         file: &mut File,
-        start_pos_bytes: u64,
+        absolute_file_start_offset: u64,
         filename: &str,
     ) -> Result<(), Self::RWError>;
+
     fn read_from_file(
         file: &mut File,
-        start_pos_bytes: u64,
+        absolute_file_start_offset: u64,
         size: usize,
         filename: &str,
     ) -> Result<Self, Self::RWError>
