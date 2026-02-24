@@ -6,7 +6,7 @@
 //! ```text
 //! Page Layout (grows in two directions):
 //! ┌─────────────────────────────────────┐  ← page_start_offset()
-//! │ PageHeader (16 bytes)               │
+//! │ PageHeader (20 bytes)               │
 //! ├─────────────────────────────────────┤  ← page_record_metadata_offset()
 //! │ PageRecord 0 metadata (20 bytes)    │
 //! ├─────────────────────────────────────┤

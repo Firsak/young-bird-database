@@ -101,15 +101,10 @@ impl BinarySerde for PageHeader {
     /// Memory layout: [page_id: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
     fn to_bytes(&self) -> Self::Output {
         let mut bytes = [0u8; HEADER_SIZE];
-        // Bytes 0-7: page_id (u64)
         bytes[0..8].copy_from_slice(&self.page_id.to_le_bytes());
-        // Bytes 8-9: records_count (u16)
         bytes[8..10].copy_from_slice(&self.records_count.to_le_bytes());
-        // Bytes 10-11: deleted_count (u16)
         bytes[10..12].copy_from_slice(&self.deleted_count.to_le_bytes());
-        // Bytes 12-15: free_space (u32)
         bytes[12..16].copy_from_slice(&self.free_space.to_le_bytes());
-        // Bytes 16-19: fragmented_space (u32)
         bytes[16..20].copy_from_slice(&self.fragmented_space.to_le_bytes());
         bytes
     }
@@ -120,20 +115,15 @@ impl BinarySerde for PageHeader {
         }
         if bytes.len() != HEADER_SIZE {
             return Err(format!(
-                "PageHeader deserialization failed: expected exactly {} bytes (8 for page_id + 2 for records_count + 2 for deleted_count + 4 for free_space + 4 for fragmented_space), got {} bytes",
+                "PageHeader deserialization failed: expected exactly {} bytes, got {} bytes",
                 HEADER_SIZE, bytes.len()
             ));
         }
 
-        // Extract page_id from bytes 0-7
         let page_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        // Extract records_count from bytes 8-9
         let records_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        // Extract deleted_count from bytes 10-11
         let deleted_count = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
-        // Extract free_space from bytes 12-15
         let free_space = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        // Extract fragmented_space from bytes 16-19
         let fragmented_space = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
 
         Ok(Self {
@@ -202,11 +192,11 @@ impl ReadWrite for PageHeader {
 
 #[derive(Debug)]
 pub struct PageRecordMetadata {
-    // 16 bytes
-    id: u64,            // 8 bytes
-    bytes_offset: u32,  // 4 bytes
-    bytes_content: u32, // 4 bytes
-    is_deleted: bool,   // 1 bytes
+    // 20 bytes: [id: 8][bytes_offset: 4][bytes_content: 4][is_deleted: 1][padding: 3]
+    id: u64,
+    bytes_offset: u32,
+    bytes_content: u32,
+    is_deleted: bool,
 }
 
 impl PageRecordMetadata {
@@ -339,7 +329,7 @@ impl ReadWrite for PageRecordMetadata {
 
 #[derive(Debug)]
 pub struct PageRecordContent {
-    content: Vec<ContentTypes>, // columns_count * 8 bytes (1 or 9 bytes if nullable)
+    content: Vec<ContentTypes>,
 }
 
 impl PageRecordContent {
@@ -651,18 +641,8 @@ mod tests {
         assert!(PageHeader::from_bytes(&[0; 30]).is_err());
     }
 
-    // Test with max values to make sure u32 free_space doesn't overflow
     #[test]
     fn page_header_max_values() {
-        // TODO(human): Create a PageHeader with large/max values:
-        //   page_id: u64::MAX, records_count: u16::MAX,
-        //   deleted_count: u16::MAX, free_space: u32::MAX, fragmented_space: u32::MAX
-        // Roundtrip and verify all fields match.
-        // page_id: u64,          // 8 bytes
-        // records_count: u16,    // 2 bytes
-        // deleted_count: u16,    // 2 bytes
-        // free_space: u32,       // 4 bytes
-        // fragmented_space: u32, // 4 bytes
         let header = PageHeader::new(u64::MAX, u16::MAX, u16::MAX, u32::MAX, u32::MAX);
         let bytes = header.to_bytes();
         
@@ -688,14 +668,8 @@ mod tests {
         assert_eq!(restored.get_bytes_content(), 256);
     }
 
-    // Verify that the is_deleted flag serializes correctly.
-    // Byte 16 should be 1 when deleted, 0 when not.
     #[test]
     fn record_metadata_deleted_flag() {
-        // TODO(human): Create two PageRecordMetadata:
-        //   one with is_deleted: true, one with is_deleted: false
-        // Serialize each, check that byte at index 16 is 1 or 0.
-        // Then roundtrip both and verify the flag value via to_bytes()[16].
         let is_deleted_record = PageRecordMetadata::new(1, 1, 5, true);
         let is_not_deleted_record = PageRecordMetadata::new(1, 1, 5, false);
 
@@ -710,8 +684,6 @@ mod tests {
 
     #[test]
     fn record_metadata_wrong_size() {
-        // TODO(human): Test with too few and too many bytes.
-        // PAGE_RECORD_METADATE_SIZE is 20, so try &[0; 10] and &[0; 30].
         assert!(PageRecordMetadata::from_bytes(&[0;10]).is_err());
         assert!(PageRecordMetadata::from_bytes(&[0;30]).is_err());
     }
@@ -720,7 +692,6 @@ mod tests {
     // PageRecordContent tests (variable size)
     // ══════════════════════════════════════════════════════════
 
-    // EXAMPLE: roundtrip with mixed content types
     #[test]
     fn record_content_mixed_types() {
         let content = PageRecordContent::new(vec![
@@ -733,11 +704,8 @@ mod tests {
         assert_eq!(restored.to_bytes(), bytes);
     }
 
-    // Test with a single column
     #[test]
     fn record_content_single_column() {
-        // TODO(human): Create a PageRecordContent with just one column
-        // (e.g., a single Int8(127)), serialize, deserialize, compare bytes.
         let content = PageRecordContent::new(vec![
             ContentTypes::Int8(127)
         ]);
@@ -746,12 +714,8 @@ mod tests {
         assert_eq!(restored.to_bytes(), bytes);
     }
 
-    // Verify the binary format starts with column count
     #[test]
     fn record_content_byte_format() {
-        // TODO(human): Create a content with 3 columns.
-        // The first 4 bytes should be 3u32 in little-endian (the column count).
-        // Hint: u32::from_le_bytes(bytes[0..4].try_into().unwrap()) should equal 3
         let content = PageRecordContent::new(vec![
             ContentTypes::Boolean(true),
             ContentTypes::Int32(42),
@@ -780,16 +744,8 @@ mod tests {
         assert_eq!(restored.to_bytes(), bytes);
     }
 
-    // Verify exact byte layout:
-    // [data_type: 1][nullable: 1][name_length: 4 LE][name: UTF-8]
     #[test]
     fn column_def_byte_layout() {
-        // TODO(human): Create ColumnDef with type=Text, nullable=false, name="email"
-        // Check:
-        //   bytes[0] == 1 (Text tag)
-        //   bytes[1] == 0 (not nullable)
-        //   bytes[2..6] == 5u32.to_le_bytes() (name length)
-        //   &bytes[6..] == b"email"
         let column = ColumnDef::new(ColumnTypes::Text, false, "email".to_string());
 
         let bytes = column.to_bytes();

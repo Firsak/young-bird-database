@@ -18,11 +18,6 @@ fn cleanup(filename: &str) {
     fs::remove_file(filename).ok();
 }
 
-// ─────────────────────────────────────────────
-// Example: converted from test_create_new_pages.rs bin
-// Shows the pattern: create file → write → read back → assert → cleanup
-// ─────────────────────────────────────────────
-
 #[test]
 fn write_and_read_new_page() {
     let filename = &temp_file("write_and_read_new_page");
@@ -46,11 +41,6 @@ fn write_and_read_new_page() {
 
     cleanup(filename);
 }
-
-// ─────────────────────────────────────────────
-// Example: write a custom header, read it back
-// Converted from test_write_page_header.rs bin
-// ─────────────────────────────────────────────
 
 #[test]
 fn write_and_read_page_header() {
@@ -77,10 +67,6 @@ fn write_and_read_page_header() {
 
     cleanup(filename);
 }
-
-// ─────────────────────────────────────────────
-// Example: add a record, read the full page back
-// ─────────────────────────────────────────────
 
 #[test]
 fn add_and_read_single_record() {
@@ -114,18 +100,8 @@ fn add_and_read_single_record() {
     cleanup(filename);
 }
 
-// ─────────────────────────────────────────────
-// YOUR TURN: implement the tests below
-// ─────────────────────────────────────────────
-
 #[test]
 fn add_multiple_records_and_read() {
-    // TODO(human): Create a page, add 2-3 records with different content types,
-    // then read the page back. Verify:
-    // - records_count matches the number added
-    // - free_space decreased (it started at 8*1024 - 20)
-    // - each record's metadata has the correct id
-    // Don't forget cleanup(filename) at the end!
     let filename = &temp_file("add_multiple_records_and_read");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
@@ -183,12 +159,6 @@ fn add_multiple_records_and_read() {
 
 #[test]
 fn delete_last_record() {
-    // TODO(human): Create a page, add 2 records, then delete the LAST one (record id 2).
-    // Deleting the last record is a "hard delete" — records_count decreases, free_space increases.
-    // Verify:
-    // - records_count is 1
-    // - deleted_records_count is still 0 (hard delete doesn't increment this)
-    // - free_space increased back
     let filename = &temp_file("delete_last_record");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
@@ -247,13 +217,6 @@ fn delete_last_record() {
 
 #[test]
 fn delete_non_last_record() {
-    // TODO(human): Create a page, add 2 records (ids 1 and 2), then delete record id 1.
-    // Deleting a non-last record is a "soft delete" — it gets marked as deleted,
-    // fragmented_space increases, but the slot stays.
-    // Verify:
-    // - records_count decreased by 1
-    // - deleted_records_count is 1
-    // - fragment_space > 0
     let filename = &temp_file("delete_non_last_record");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
@@ -313,9 +276,6 @@ fn delete_non_last_record() {
 
 #[test]
 fn update_record_smaller_content() {
-    // TODO(human): Create a page, add a record with Text("hello world"),
-    // then update it with Text("hi"). The new content is smaller so it fits in place.
-    // Verify the header's free_space or fragmented_space changed appropriately.
     let filename = &temp_file("update_record_smaller_content");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
@@ -405,10 +365,6 @@ fn multiple_pages_independent() {
     cleanup(filename);
 }
 
-// ─────────────────────────────────────────────
-// read_record_content tests
-// ─────────────────────────────────────────────
-
 #[test]
 fn read_single_record_content() {
     let filename = &temp_file("read_single_record_content");
@@ -450,12 +406,6 @@ fn read_single_record_content() {
 
 #[test]
 fn read_multiple_records_content() {
-    // TODO(human): Create a page, add 2 records with different content:
-    //   record 1: [Null, Int64(999999), Text("first")]
-    //   record 2: [Boolean(false), UInt8(255), Text("second")]
-    // Read each record's content back using read_record_metadata + read_record_content
-    // and verify with get_content() that the values match what was written.
-    // Hint: metadata index 0 → record 1, index 1 → record 2
     let filename = &temp_file("read_multiple_records_content");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
@@ -526,11 +476,6 @@ fn read_multiple_records_content() {
 
 #[test]
 fn read_record_content_after_update() {
-    // TODO(human): Create a page, add a record with Text("original"),
-    // update it with Text("updated") using update_record,
-    // then read the content back and verify it returns "updated", not "original".
-    // Hint: after update, the metadata offset may have changed,
-    // so read fresh metadata before reading content.
     let filename = &temp_file("read_record_content_after_update");
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;

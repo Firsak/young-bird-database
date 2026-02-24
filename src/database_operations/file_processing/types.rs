@@ -386,16 +386,8 @@ mod tests {
         assert_eq!(restored.to_bytes(), [0]); // verify it matches
     }
 
-    // Test that ALL ColumnTypes variants survive to_bytes -> from_bytes.
-    // Hint: create each variant, serialize, deserialize, then compare
-    // the tag bytes. You can check all 12 variants in one test.
     #[test]
     fn column_types_all_variants_roundtrip() {
-        // TODO(human): Test all ColumnTypes variants (Text, Int8, Int16, etc.)
-        // For each variant:
-        //   1. let bytes = ColumnTypes::Text.to_bytes();
-        //   2. let restored = ColumnTypes::from_bytes(&bytes).unwrap();
-        //   3. assert_eq!(restored.to_bytes(), bytes);
         let all_colum_types = [
             ColumnTypes::Boolean, //  0
             ColumnTypes::Text,    //  1

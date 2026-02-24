@@ -10,6 +10,7 @@ use crate::database_operations::file_processing::{
     table_offsets, HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE,
 };
 
+/// Reads only the page header at the given page number.
 pub fn read_page_header(
     filename: &str,
     page_number: u64,
@@ -28,6 +29,7 @@ pub fn read_page_header(
     PageHeader::read_from_file(&mut file, page_number * (size as u64), size, filename)
 }
 
+/// Reads a full page: header, all record metadata, and all record content.
 pub fn read_page(
     filename: &str,
     page_number: u64,
@@ -93,6 +95,7 @@ pub fn read_page(
     Ok(page)
 }
 
+/// Reads a single record's metadata by its slot index within the page.
 pub fn read_record_metadata(
     filename: &str,
     page_number: u64,
@@ -120,6 +123,7 @@ pub fn read_record_metadata(
     )
 }
 
+/// Reads a record's content using its metadata (which provides offset and size).
 pub fn read_record_content(
     filename: &str,
     page_number: u64,

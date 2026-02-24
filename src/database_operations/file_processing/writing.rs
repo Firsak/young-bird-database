@@ -1,7 +1,6 @@
 use std::error::Error;
-use std::fmt::format;
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 
 use crate::database_operations::file_processing::table::{
     PageHeader, PageRecordMetadata, PageRecordContent,
@@ -9,6 +8,7 @@ use crate::database_operations::file_processing::table::{
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
 
+/// Overwrites the header of an existing page. The page must already exist in the file.
 pub fn write_page_header(
     filename: &str,
     page_number: u64,
@@ -33,6 +33,8 @@ pub fn write_page_header(
     page_header.write_to_file(&mut file, page_number * (size as u64), filename)
 }
 
+/// Creates a new empty page at the given page number.
+/// Writes an initialized header and expands the file to fit the full page.
 pub fn write_new_page(
     filename: &str,
     page_number: u64,
@@ -74,6 +76,8 @@ pub fn write_new_page(
     }
 }
 
+/// Appends a new record to a page. Writes metadata after existing metadata slots
+/// and content at the end of the page growing backwards. Returns error if not enough free space.
 pub fn add_new_record(
     filename: &str,
     page_number: u64,
@@ -141,6 +145,8 @@ pub fn add_new_record(
     Ok(())
 }
 
+/// Scans metadata slots sequentially to find a record by its ID.
+/// Returns (metadata, slot_index) or (None, None) if not found.
 fn find_record_metadata_by_id(
     file_ref: &mut std::fs::File,
     filename: &str,
@@ -167,6 +173,8 @@ fn find_record_metadata_by_id(
     Ok((found_record_metadata, found_record_metadata_index))
 }
 
+/// Deletes a record by ID. Last record is hard-deleted (slot reclaimed, free_space increases).
+/// Non-last records are soft-deleted (marked deleted, fragmented_space increases).
 pub fn delete_record(
     filename: &str,
     page_number: u64,
@@ -241,6 +249,9 @@ pub fn delete_record(
     }
 }
 
+/// Updates a record's content by ID. If the new content fits in the old slot, it's written
+/// in place. If larger, the old space becomes fragmented and content is written at a new position.
+/// Returns error if the page doesn't have enough free space for the larger content.
 pub fn update_record(
     filename: &str,
     page_number: u64,
