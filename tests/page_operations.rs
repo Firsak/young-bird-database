@@ -266,7 +266,7 @@ fn delete_non_last_record() {
     let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
-    assert_eq!(page.header.get_records_count(), 2);
+    assert_eq!(page.header.get_records_count(), 3); // stays 3: soft delete doesn't decrement
     assert_eq!(page.header.get_free_space(), saved_free_space);
     assert!(page.header.get_fragment_space() > saved_fragmented_space);
     assert_eq!(page.header.get_deleted_records_count(), 1);
@@ -539,6 +539,172 @@ fn read_record_content_after_update() {
         assert_eq!(values[1], ContentTypes::Int32(422));
         assert_eq!(values[2], ContentTypes::Text("hello world".to_string()));
     }
+
+    cleanup(filename);
+}
+
+#[test]
+fn compact_page_no_fragmentation() {
+    let filename = &temp_file("compact_page_no_fragmentation");
+    let page_kbytes: u32 = 8;
+    let page_number: u64 = 0;
+
+    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+        .expect("Failed to write new page");
+
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Int32(42),
+        ContentTypes::Text("no fragmentation".to_string()),
+    ]);
+    file_processing::writing::add_new_record(filename, page_number, page_kbytes, 1, record)
+        .expect("Failed to add record");
+
+    let header_before =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+
+    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+        .expect("Failed to compact page");
+
+    let header_after =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+
+    assert_eq!(header_after.get_records_count(), header_before.get_records_count());
+    assert_eq!(header_after.get_free_space(), header_before.get_free_space());
+    assert_eq!(header_after.get_fragment_space(), 0);
+
+    cleanup(filename);
+}
+
+#[test]
+fn compact_page_all_deleted() {
+    let filename = &temp_file("compact_page_all_deleted");
+    let page_kbytes: u32 = 8;
+    let page_number: u64 = 0;
+
+    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+        .expect("Failed to write new page");
+
+    for i in 0..3u64 {
+        let record = PageRecordContent::new(vec![
+            ContentTypes::Int32(i as i32),
+            ContentTypes::Text(format!("record_{}", i)),
+        ]);
+        file_processing::writing::add_new_record(filename, page_number, page_kbytes, i, record)
+            .expect("Failed to add record");
+    }
+
+    // Soft-delete records 0 and 1 (non-last)
+    file_processing::writing::delete_record(filename, page_number, page_kbytes, 0)
+        .expect("Failed to delete record 0");
+    file_processing::writing::delete_record(filename, page_number, page_kbytes, 1)
+        .expect("Failed to delete record 1");
+    // Hard-delete record 2 (last slot)
+    file_processing::writing::delete_record(filename, page_number, page_kbytes, 2)
+        .expect("Failed to delete record 2");
+
+    let header_before =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+    assert!(header_before.get_fragment_space() > 0);
+    assert_eq!(header_before.get_deleted_records_count(), 2);
+
+    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+        .expect("Failed to compact page");
+
+    let header_after =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+
+    assert_eq!(header_after.get_records_count(), 0);
+    assert_eq!(header_after.get_deleted_records_count(), 0);
+    assert_eq!(header_after.get_fragment_space(), 0);
+    assert_eq!(header_after.get_free_space(), (8 * 1024 - 20) as u32);
+
+    cleanup(filename);
+}
+
+#[test]
+fn compact_page_after_soft_delete() {
+    let filename = &temp_file("compact_page_after_soft_delete");
+    let page_kbytes: u32 = 8;
+    let page_number: u64 = 0;
+
+    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+        .expect("Failed to write new page");
+
+    let record_0 = PageRecordContent::new(vec![
+        ContentTypes::Boolean(true),
+        ContentTypes::Int32(100),
+        ContentTypes::Text("first".to_string()),
+    ]);
+    let record_1 = PageRecordContent::new(vec![
+        ContentTypes::Boolean(false),
+        ContentTypes::Int32(200),
+        ContentTypes::Text("second".to_string()),
+    ]);
+    let record_2 = PageRecordContent::new(vec![
+        ContentTypes::Boolean(true),
+        ContentTypes::Int32(300),
+        ContentTypes::Text("third".to_string()),
+    ]);
+
+    for (i, record) in [record_0, record_1, record_2].into_iter().enumerate() {
+        file_processing::writing::add_new_record(
+            filename, page_number, page_kbytes, i as u64, record,
+        )
+        .expect("Failed to add record");
+    }
+
+    // Soft-delete record 0 (non-last)
+    file_processing::writing::delete_record(filename, page_number, page_kbytes, 0)
+        .expect("Failed to delete record 0");
+
+    let header_before =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+    assert!(header_before.get_fragment_space() > 0);
+
+    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+        .expect("Failed to compact page");
+
+    let header_after =
+        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+            .expect("Failed to read header");
+
+    assert_eq!(header_after.get_records_count(), 2);
+    assert_eq!(header_after.get_deleted_records_count(), 0);
+    assert_eq!(header_after.get_fragment_space(), 0);
+    assert!(header_after.get_free_space() > header_before.get_free_space());
+
+    // Verify record 1 content (now at slot 0 after compaction)
+    let metadata_0 =
+        file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+            .expect("Failed to read metadata 0");
+    let content_0 = file_processing::reading::read_record_content(
+        filename, page_number, page_kbytes, &metadata_0,
+    )
+    .expect("Failed to read content 0");
+
+    let values_0 = content_0.get_content();
+    assert_eq!(values_0[0], ContentTypes::Boolean(false));
+    assert_eq!(values_0[1], ContentTypes::Int32(200));
+    assert_eq!(values_0[2], ContentTypes::Text("second".to_string()));
+
+    // Verify record 2 content (now at slot 1 after compaction)
+    let metadata_1 =
+        file_processing::reading::read_record_metadata(filename, page_number, 1, page_kbytes)
+            .expect("Failed to read metadata 1");
+    let content_1 = file_processing::reading::read_record_content(
+        filename, page_number, page_kbytes, &metadata_1,
+    )
+    .expect("Failed to read content 1");
+
+    let values_1 = content_1.get_content();
+    assert_eq!(values_1[0], ContentTypes::Boolean(true));
+    assert_eq!(values_1[1], ContentTypes::Int32(300));
+    assert_eq!(values_1[2], ContentTypes::Text("third".to_string()));
 
     cleanup(filename);
 }

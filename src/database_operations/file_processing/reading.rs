@@ -7,7 +7,7 @@ use crate::database_operations::file_processing::table::{
 };
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::{
-    table_offsets, HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE,
+    self, table_offsets, HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE,
 };
 
 /// Reads only the page header at the given page number.
@@ -43,8 +43,9 @@ pub fn read_page(
         }
     };
 
-    let size: usize = page_kbytes as usize * KBYTES;
-    let _ = match file.seek(SeekFrom::Start(page_number * (size as u64))) {
+    let page_size: usize = page_kbytes as usize * KBYTES;
+    let page_offset = file_processing::table_offsets::page_start_offset(page_number, page_size);
+    let _ = match file.seek(SeekFrom::Start(page_offset)) {
         Ok(pos) => pos,
         Err(error) => {
             println!("Error seeking in the file {filename}: {error}");
@@ -52,15 +53,17 @@ pub fn read_page(
         }
     };
 
-    let mut buffer: Vec<u8> = vec![0u8; size];
+    let mut page_buffer: Vec<u8> = vec![0u8; page_size];
 
-    let header = match file.read_exact(&mut buffer) {
-        Ok(_) => PageHeader::from_bytes(&(buffer[0..HEADER_SIZE]))?,
+    match file.read_exact(&mut page_buffer) {
+        Ok(_) => {}
         Err(error) => {
             println!("Error reading page {page_number} in {filename}: {error}");
             return Err(Box::new(error));
         }
     };
+
+    let header = PageHeader::from_bytes(&(page_buffer[0..HEADER_SIZE]))?;
 
     let mut page = Page::new(
         header,
@@ -68,27 +71,25 @@ pub fn read_page(
         Vec::new() as Vec<PageRecordContent>,
     );
 
-    for pos in 0..page.header.get_records_count() {
-        let record_metadata_pos = page_number * size as u64
-            + HEADER_SIZE as u64
-            + (pos as u64 * PAGE_RECORD_METADATE_SIZE as u64);
-        let record_metadata = PageRecordMetadata::read_from_file(
-            &mut file,
-            record_metadata_pos,
-            PAGE_RECORD_METADATE_SIZE,
-            filename,
+    for index in 0..page.header.get_records_count() {
+        let record_metadata_buffer_pos = HEADER_SIZE + index as usize * PAGE_RECORD_METADATE_SIZE;
+        let record_metadata = PageRecordMetadata::from_bytes(
+            &page_buffer[record_metadata_buffer_pos
+                ..record_metadata_buffer_pos + PAGE_RECORD_METADATE_SIZE],
         )?;
-        let record_content_pos =
-            page_number * size as u64 + record_metadata.get_bytes_offset() as u64;
-        let record_content_size = record_metadata.get_bytes_content();
+
+        if record_metadata.get_is_deleted() {
+            continue;
+        }
+
+        let record_content_buffer_pos =
+            record_metadata.get_bytes_offset() as usize;
+        let record_content_size = record_metadata.get_bytes_content() as usize;
+        let record_content = PageRecordContent::from_bytes(&page_buffer[record_content_buffer_pos..record_content_buffer_pos + record_content_size])?; 
+
         page.append_record(
             record_metadata,
-            PageRecordContent::read_from_file(
-                &mut file,
-                record_content_pos,
-                record_content_size as usize,
-                filename,
-            )?,
+            record_content
         );
     }
 
@@ -140,7 +141,11 @@ pub fn read_record_content(
 
     let page_size: usize = page_kbytes as usize * KBYTES;
 
-    let absolute_file_start_offset = table_offsets::page_record_content_offset_absolute_file(page_number, page_size, record_metadata.get_bytes_offset() as u64);
+    let absolute_file_start_offset = table_offsets::page_record_content_offset_absolute_file(
+        page_number,
+        page_size,
+        record_metadata.get_bytes_offset() as u64,
+    );
     let size = record_metadata.get_bytes_content() as usize;
     PageRecordContent::read_from_file(&mut file, absolute_file_start_offset, size, filename)
 }

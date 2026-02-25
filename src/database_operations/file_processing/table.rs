@@ -37,7 +37,7 @@ impl Page {
 #[derive(Debug)]
 pub struct PageHeader {
     // 20 bytes
-    page_id: u64,          // 8 bytes
+    pub(in crate::database_operations::file_processing) page_id: u64,          // 8 bytes
     records_count: u16,    // 2 bytes
     deleted_count: u16,    // 2 bytes
     free_space: u32,       // 4 bytes
@@ -219,6 +219,10 @@ impl PageRecordMetadata {
 
     pub fn get_bytes_content(&self) -> u32 {
         self.bytes_content
+    }
+
+    pub fn get_is_deleted(&self) -> bool {
+        self.is_deleted
     }
 
     pub fn set_is_deleted(&mut self, is_deleted: bool) {
