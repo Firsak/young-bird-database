@@ -1,6 +1,6 @@
 use super::traits::BinarySerde;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ContentTypes {
     Null,          //  0
     Boolean(bool), //  1

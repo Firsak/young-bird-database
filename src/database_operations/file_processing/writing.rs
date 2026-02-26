@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
 use crate::database_operations::file_processing::table::{
-    PageHeader, PageRecordContent, PageRecordMetadata,
+    Page, PageHeader, PageRecordContent, PageRecordMetadata,
 };
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::{
@@ -394,22 +394,24 @@ pub fn update_record(
     }
 }
 
-/// Compacts a page by rewriting all non-deleted records contiguously,
-/// eliminating fragmented space. No-op if fragmented_space is already 0.
-pub fn compact_page(
+/// Writes a full Page struct to file at the given page number using a single I/O call.
+/// Builds a page-sized buffer in memory, then flushes it to disk.
+/// The Page should contain only active (non-deleted) records.
+pub fn write_page(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
+    page: &Page,
 ) -> Result<(), Box<dyn Error>> {
     let mut file = match OpenOptions::new()
-        .read(true)
         .write(true)
+        .create(true)
         .truncate(false)
         .open(filename)
     {
         Ok(file) => file,
         Err(error) => {
-            println!("Error opening the file {filename}: {error}");
+            println!("Error opening or creating the file {filename}: {error}");
             return Err(Box::new(error));
         }
     };
@@ -417,105 +419,105 @@ pub fn compact_page(
     let page_size: usize = page_kbytes as usize * KBYTES;
     let page_pos = page_number * (page_size as u64);
 
-    let page_header = PageHeader::read_from_file(&mut file, page_pos, page_size, filename)?;
+    let mut buffer: Vec<u8> = vec![0u8; page_size];
 
-    if page_header.get_fragment_space() == 0 {
+    let page_header_bytes = page.header.to_bytes();
+
+    buffer[0..HEADER_SIZE].copy_from_slice(&page_header_bytes);
+
+    for index in 0..page.get_records_metadata().len() {
+        let record_metadata = &page.get_records_metadata()[index];
+        let metadata_bytes = record_metadata.to_bytes();
+        let metadata_pos = HEADER_SIZE + index * PAGE_RECORD_METADATE_SIZE;
+        buffer[metadata_pos..metadata_pos + PAGE_RECORD_METADATE_SIZE]
+            .copy_from_slice(&metadata_bytes);
+
+        let record_content = page.get_record_content_by_metadata_index(index);
+        let content_bytes = record_content.to_bytes();
+        let content_len = record_metadata.get_bytes_content();
+        let content_pos = record_metadata.get_bytes_offset();
+        buffer[content_pos as usize..content_pos as usize + content_len as usize]
+            .copy_from_slice(&content_bytes);
+    }
+
+    let _ = match file.seek(SeekFrom::Start(page_pos)) {
+        Ok(pos) => pos,
+        Err(error) => {
+            println!("Error seeking in the file {filename}: {error}");
+            return Err(Box::new(error));
+        }
+    };
+
+    match file.write_all(&buffer) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            println!("Error writing page to the file {filename}: {error}");
+            Err(Box::new(error))
+        }
+    }
+}
+
+/// Compacts a page by rewriting all non-deleted records contiguously,
+/// eliminating fragmented space. No-op if fragmented_space is already 0.
+pub fn compact_page(
+    filename: &str,
+    page_number: u64,
+    page_kbytes: u32,
+) -> Result<(), Box<dyn Error>> {
+    let old_page = file_processing::reading::read_page(filename, page_number, page_kbytes)?;
+
+    if old_page.header.get_fragment_space() == 0 {
         return Ok(());
     }
 
-    let mut new_header = PageHeader::new(
-        page_header.page_id,
+    let page_size: usize = page_kbytes as usize * KBYTES;
+
+    let new_header = PageHeader::new(
+        old_page.header.page_id,
         0,
         0,
         (page_size - HEADER_SIZE) as u32,
         0,
     );
-    let header_offset = file_processing::table_offsets::page_header_offset(page_number, page_size);
 
-    if page_header.get_records_count() == 0 {
-        new_header.write_to_file(&mut file, header_offset, filename)?;
-        return Ok(());
-    }
+    let mut new_page = Page::new(new_header, vec![], vec![]);
 
-    let mut new_records_metadata: Vec<PageRecordMetadata> = vec![];
-    let mut new_records_content: Vec<PageRecordContent> = vec![];
+    for index in 0..old_page.get_records_metadata().len() {
+        let old_metadata = &old_page.get_records_metadata()[index];
+        let content = old_page.get_record_content_by_metadata_index(index);
 
-    for index in 0..page_header.get_records_count() {
-        let record_metadata_offset = file_processing::table_offsets::page_record_metadata_offset(
-            page_number,
-            page_size,
-            index,
-        );
-        let tmp_record_metadata = PageRecordMetadata::read_from_file(
-            &mut file,
-            record_metadata_offset,
-            PAGE_RECORD_METADATE_SIZE,
-            filename,
-        )?;
-
-        if !tmp_record_metadata.get_is_deleted() {
-            let absolute_file_start_offset =
-                file_processing::table_offsets::page_record_content_offset_absolute_file(
-                    page_number,
-                    page_size,
-                    tmp_record_metadata.get_bytes_offset() as u64,
-                );
-            let size = tmp_record_metadata.get_bytes_content() as usize;
-            let tmp_record_content = PageRecordContent::read_from_file(
-                &mut file,
-                absolute_file_start_offset,
-                size,
-                filename,
-            )?;
-
-            new_records_content.push(tmp_record_content);
-
-            let last_record = {
-                if new_records_metadata.is_empty() {
-                    None
-                } else {
-                    Some(&new_records_metadata[new_records_metadata.len() - 1])
-                }
-            };
-            let new_record_offset =
-                file_processing::table_offsets::page_record_content_offset_relative_page_end(
-                    page_size,
-                    last_record,
-                    tmp_record_metadata.get_bytes_content() as usize,
-                );
-            let new_metadata = PageRecordMetadata::new(
-                tmp_record_metadata.get_id(),
-                new_record_offset as u32,
-                tmp_record_metadata.get_bytes_content(),
-                false,
-            );
-
-            new_records_metadata.push(new_metadata);
-        }
-    }
-
-    for index in 0..new_records_metadata.len() {
-        let metadata_offset = file_processing::table_offsets::page_record_metadata_offset(
-            page_number,
-            page_size,
-            index as u16,
-        );
-        new_records_metadata[index].write_to_file(&mut file, metadata_offset, filename)?;
-        let content_offset =
-            file_processing::table_offsets::page_record_content_offset_absolute_file(
-                page_number,
+        let last_record = {
+            if new_page.get_records_metadata().is_empty() {
+                None
+            } else {
+                Some(&new_page.get_records_metadata()[new_page.get_records_metadata().len() - 1])
+            }
+        };
+        let new_content_offset =
+            file_processing::table_offsets::page_record_content_offset_relative_page_end(
                 page_size,
-                new_records_metadata[index].get_bytes_offset() as u64,
+                last_record,
+                old_metadata.get_bytes_content() as usize,
             );
-        new_records_content[index].write_to_file(&mut file, content_offset, filename)?;
-        new_header.update_records_count(new_header.get_records_count() + 1);
-        new_header.update_free_space(
-            new_header.get_free_space()
-                - PAGE_RECORD_METADATE_SIZE as u32
-                - new_records_metadata[index].get_bytes_content(),
+        let new_metadata = PageRecordMetadata::new(
+            old_metadata.get_id(),
+            new_content_offset as u32,
+            old_metadata.get_bytes_content(),
+            false,
         );
-    }
-    new_header.write_to_file(&mut file, header_offset, filename)?;
 
-    Ok(())
+        let new_content = PageRecordContent::new(content.get_content().clone());
+
+        new_page
+            .header
+            .update_records_count(new_page.header.get_records_count() + 1);
+        new_page.header.update_free_space(
+            new_page.header.get_free_space()
+                - PAGE_RECORD_METADATE_SIZE as u32
+                - new_metadata.get_bytes_content(),
+        );
+        new_page.append_record(new_metadata, new_content);
+    }
+
+    file_processing::writing::write_page(filename, page_number, page_kbytes, &new_page)
 }

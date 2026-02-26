@@ -32,16 +32,34 @@ impl Page {
         self.records.extend([record]);
         self.records_content.insert(0, record_content);
     }
+
+    pub fn get_records_metadata(&self) -> &Vec<PageRecordMetadata> {
+        &self.records
+    }
+
+    pub fn get_records_content(&self) -> &Vec<PageRecordContent> {
+        &self.records_content
+    }
+
+    /// Returns the content paired with the metadata at the given index.
+    /// Content is stored in reverse order internally (insert(0, ...)),
+    /// so records[i] pairs with records_content[len - 1 - i].
+    pub fn get_record_content_by_metadata_index(
+        &self,
+        metadata_index: usize,
+    ) -> &PageRecordContent {
+        &self.records_content[&self.records_content.len() - 1 - metadata_index]
+    }
 }
 
 #[derive(Debug)]
 pub struct PageHeader {
     // 20 bytes
-    pub(in crate::database_operations::file_processing) page_id: u64,          // 8 bytes
-    records_count: u16,    // 2 bytes
-    deleted_count: u16,    // 2 bytes
-    free_space: u32,       // 4 bytes
-    fragmented_space: u32, // 4 bytes
+    pub(in crate::database_operations::file_processing) page_id: u64, // 8 bytes
+    records_count: u16,                                               // 2 bytes
+    deleted_count: u16,                                               // 2 bytes
+    free_space: u32,                                                  // 4 bytes
+    fragmented_space: u32,                                            // 4 bytes
 }
 
 impl PageHeader {
@@ -116,7 +134,8 @@ impl BinarySerde for PageHeader {
         if bytes.len() != HEADER_SIZE {
             return Err(format!(
                 "PageHeader deserialization failed: expected exactly {} bytes, got {} bytes",
-                HEADER_SIZE, bytes.len()
+                HEADER_SIZE,
+                bytes.len()
             ));
         }
 
@@ -649,12 +668,27 @@ mod tests {
     fn page_header_max_values() {
         let header = PageHeader::new(u64::MAX, u16::MAX, u16::MAX, u32::MAX, u32::MAX);
         let bytes = header.to_bytes();
-        
-        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), u64::MAX);
-        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), u16::MAX);
-        assert_eq!(u16::from_le_bytes(bytes[10..12].try_into().unwrap()), u16::MAX);
-        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), u32::MAX);
-        assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), u32::MAX); 
+
+        assert_eq!(
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            u64::MAX
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+            u16::MAX
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[10..12].try_into().unwrap()),
+            u16::MAX
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+            u32::MAX
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            u32::MAX
+        );
     }
 
     // ══════════════════════════════════════════════════════════
@@ -688,8 +722,8 @@ mod tests {
 
     #[test]
     fn record_metadata_wrong_size() {
-        assert!(PageRecordMetadata::from_bytes(&[0;10]).is_err());
-        assert!(PageRecordMetadata::from_bytes(&[0;30]).is_err());
+        assert!(PageRecordMetadata::from_bytes(&[0; 10]).is_err());
+        assert!(PageRecordMetadata::from_bytes(&[0; 30]).is_err());
     }
 
     // ══════════════════════════════════════════════════════════
@@ -710,9 +744,7 @@ mod tests {
 
     #[test]
     fn record_content_single_column() {
-        let content = PageRecordContent::new(vec![
-            ContentTypes::Int8(127)
-        ]);
+        let content = PageRecordContent::new(vec![ContentTypes::Int8(127)]);
         let bytes = content.to_bytes();
         let restored = PageRecordContent::from_bytes(&bytes).unwrap();
         assert_eq!(restored.to_bytes(), bytes);
