@@ -1,8 +1,7 @@
 use std::fs;
 
 use young_bird_database::database_operations::file_processing::{
-    self,
-    table::{PageHeader, PageRecordContent},
+    page::{self, PageHeader, PageRecordContent},
     traits::BinarySerde,
     types::ContentTypes,
 };
@@ -26,11 +25,11 @@ fn write_and_read_new_page() {
     let page_number: u64 = 0;
 
     // Write a new empty page
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     // Read it back
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read page");
 
     // Verify the header has correct initial values
@@ -49,16 +48,16 @@ fn write_and_read_page_header() {
     let page_kbytes: u32 = 8;
 
     // First create the page so the file has enough space
-    file_processing::writing::write_new_page(filename, 0, page_kbytes)
+    page::writing::write_new_page(filename, 0, page_kbytes)
         .expect("Failed to write new page");
 
     // Overwrite with a custom header
     let custom_header = PageHeader::new(42, 5, 1, 7000, 100);
-    file_processing::writing::write_page_header(filename, 0, custom_header, page_kbytes)
+    page::writing::write_page_header(filename, 0, custom_header, page_kbytes)
         .expect("Failed to write page header");
 
     // Read just the header back
-    let read_header = file_processing::reading::read_page_header(filename, 0, page_kbytes)
+    let read_header = page::reading::read_page_header(filename, 0, page_kbytes)
         .expect("Failed to read page header");
 
     assert_eq!(read_header.get_records_count(), 5);
@@ -74,7 +73,7 @@ fn add_and_read_single_record() {
     let filename = &temp_file("add_and_read_single_record");
     let page_kbytes: u32 = 8;
 
-    file_processing::writing::write_new_page(filename, 0, page_kbytes)
+    page::writing::write_new_page(filename, 0, page_kbytes)
         .expect("Failed to write new page");
 
     let record = PageRecordContent::new(vec![
@@ -83,18 +82,18 @@ fn add_and_read_single_record() {
         ContentTypes::Text("hello".to_string()),
     ]);
 
-    file_processing::writing::add_new_record(filename, 0, page_kbytes, 1, record)
+    page::writing::add_new_record(filename, 0, page_kbytes, 1, record)
         .expect("Failed to add record");
 
     // Read the full page — should have 1 record
     let page =
-        file_processing::reading::read_page(filename, 0, page_kbytes).expect("Failed to read page");
+        page::reading::read_page(filename, 0, page_kbytes).expect("Failed to read page");
 
     assert_eq!(page.header.get_records_count(), 1);
     assert_eq!(page.header.get_deleted_records_count(), 0);
 
     // Read the record metadata to check its id
-    let metadata = file_processing::reading::read_record_metadata(filename, 0, 0, page_kbytes)
+    let metadata = page::reading::read_record_metadata(filename, 0, 0, page_kbytes)
         .expect("Failed to read record metadata");
     assert_eq!(metadata.get_id(), 1);
 
@@ -108,7 +107,7 @@ fn add_multiple_records_and_read() {
     let page_number: u64 = 0;
 
     // Write a new empty page
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_1 = PageRecordContent::new(vec![
@@ -128,7 +127,7 @@ fn add_multiple_records_and_read() {
     ]);
 
     for (index, record) in [record_1, record_2, record_3].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename,
             page_number,
             page_kbytes,
@@ -138,14 +137,14 @@ fn add_multiple_records_and_read() {
         .expect(&format!("Failed to add record_{}", index));
     }
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_records_count(), 3);
     assert!(page.header.get_free_space() < 8 * 1024 - 20);
 
     for index in 0..3 {
-        let record_metadata = file_processing::reading::read_record_metadata(
+        let record_metadata = page::reading::read_record_metadata(
             filename,
             page_number,
             index as u64,
@@ -165,7 +164,7 @@ fn delete_last_record() {
     let page_number: u64 = 0;
 
     // Write a new empty page
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_1 = PageRecordContent::new(vec![
@@ -185,7 +184,7 @@ fn delete_last_record() {
     ]);
 
     for (index, record) in [record_1, record_2, record_3].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename,
             page_number,
             page_kbytes,
@@ -195,17 +194,17 @@ fn delete_last_record() {
         .expect(&format!("Failed to add record_{}", index));
     }
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_records_count(), 3);
 
     let saved_free_space = page.header.get_free_space();
 
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 2)
+    page::writing::delete_record(filename, page_number, page_kbytes, 2)
         .expect("Failed to delete the record");
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_records_count(), 2);
@@ -223,7 +222,7 @@ fn delete_non_last_record() {
     let page_number: u64 = 0;
 
     // Write a new empty page
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_1 = PageRecordContent::new(vec![
@@ -243,7 +242,7 @@ fn delete_non_last_record() {
     ]);
 
     for (index, record) in [record_1, record_2, record_3].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename,
             page_number,
             page_kbytes,
@@ -253,7 +252,7 @@ fn delete_non_last_record() {
         .expect(&format!("Failed to add record_{}", index));
     }
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_records_count(), 3);
@@ -261,10 +260,10 @@ fn delete_non_last_record() {
     let saved_free_space = page.header.get_free_space();
     let saved_fragmented_space = page.header.get_fragment_space();
 
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 1)
+    page::writing::delete_record(filename, page_number, page_kbytes, 1)
         .expect("Failed to delete the record");
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_records_count(), 3); // stays 3: soft delete doesn't decrement
@@ -282,7 +281,7 @@ fn update_record_smaller_content() {
     let page_number: u64 = 0;
 
     // Write a new empty page
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_1 = PageRecordContent::new(vec![
@@ -302,7 +301,7 @@ fn update_record_smaller_content() {
     ]);
 
     for (index, record) in [record_1, record_2, record_3].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename,
             page_number,
             page_kbytes,
@@ -312,7 +311,7 @@ fn update_record_smaller_content() {
         .expect(&format!("Failed to add record_{}", index));
     }
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     let saved_free_space = page.header.get_free_space();
@@ -323,10 +322,10 @@ fn update_record_smaller_content() {
         ContentTypes::Int32(435),
         ContentTypes::Text("old".to_string()),
     ]);
-    file_processing::writing::update_record(filename, page_number, page_kbytes, 1, new_record)
+    page::writing::update_record(filename, page_number, page_kbytes, 1, new_record)
         .expect("Failed updating record");
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read the page");
 
     assert_eq!(page.header.get_free_space(), saved_free_space);
@@ -341,7 +340,7 @@ fn multiple_pages_independent() {
     let page_kbytes: u32 = 8;
 
     for page in 0..3u64 {
-        file_processing::writing::write_new_page(filename, page, page_kbytes)
+        page::writing::write_new_page(filename, page, page_kbytes)
             .expect(&format!("Failed to write page {}", page));
     }
 
@@ -349,14 +348,14 @@ fn multiple_pages_independent() {
         ContentTypes::Int32(999),
         ContentTypes::Text("only on page 1".to_string()),
     ]);
-    file_processing::writing::add_new_record(filename, 1, page_kbytes, 1, record)
+    page::writing::add_new_record(filename, 1, page_kbytes, 1, record)
         .expect("Failed to add record to page 1");
 
-    let header_0 = file_processing::reading::read_page_header(filename, 0, page_kbytes)
+    let header_0 = page::reading::read_page_header(filename, 0, page_kbytes)
         .expect("Failed to read page 0");
-    let header_1 = file_processing::reading::read_page_header(filename, 1, page_kbytes)
+    let header_1 = page::reading::read_page_header(filename, 1, page_kbytes)
         .expect("Failed to read page 1");
-    let header_2 = file_processing::reading::read_page_header(filename, 2, page_kbytes)
+    let header_2 = page::reading::read_page_header(filename, 2, page_kbytes)
         .expect("Failed to read page 2");
 
     assert_eq!(header_0.get_records_count(), 0);
@@ -372,7 +371,7 @@ fn read_single_record_content() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record = PageRecordContent::new(vec![
@@ -381,14 +380,14 @@ fn read_single_record_content() {
         ContentTypes::Text("hello".to_string()),
     ]);
 
-    file_processing::writing::add_new_record(filename, page_number, page_kbytes, 1, record)
+    page::writing::add_new_record(filename, page_number, page_kbytes, 1, record)
         .expect("Failed to add record");
 
     // Read metadata first, then use it to read content
     let metadata =
-        file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+        page::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
             .expect("Failed to read metadata");
-    let content = file_processing::reading::read_record_content(
+    let content = page::reading::read_record_content(
         filename,
         page_number,
         page_kbytes,
@@ -411,7 +410,7 @@ fn read_multiple_records_content() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_1 = PageRecordContent::new(vec![
@@ -426,7 +425,7 @@ fn read_multiple_records_content() {
     ]);
 
     for (index, record) in [record_1, record_2].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename,
             page_number,
             page_kbytes,
@@ -437,9 +436,9 @@ fn read_multiple_records_content() {
     }
 
     let metadata_1 =
-        file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+        page::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
             .expect("Failed to read metadata");
-    let content_1 = file_processing::reading::read_record_content(
+    let content_1 = page::reading::read_record_content(
         filename,
         page_number,
         page_kbytes,
@@ -455,9 +454,9 @@ fn read_multiple_records_content() {
     );
 
     let metadata_2 =
-        file_processing::reading::read_record_metadata(filename, page_number, 1, page_kbytes)
+        page::reading::read_record_metadata(filename, page_number, 1, page_kbytes)
             .expect("Failed to read metadata");
-    let content_2 = file_processing::reading::read_record_content(
+    let content_2 = page::reading::read_record_content(
         filename,
         page_number,
         page_kbytes,
@@ -481,7 +480,7 @@ fn read_record_content_after_update() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record = PageRecordContent::new(vec![
@@ -490,15 +489,15 @@ fn read_record_content_after_update() {
         ContentTypes::Text("hello".to_string()),
     ]);
 
-    file_processing::writing::add_new_record(filename, page_number, page_kbytes, 0, record)
+    page::writing::add_new_record(filename, page_number, page_kbytes, 0, record)
         .expect("Failed to add record");
 
     {
         // Read metadata first, then use it to read content
         let metadata =
-            file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+            page::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
                 .expect("Failed to read metadata");
-        let content = file_processing::reading::read_record_content(
+        let content = page::reading::read_record_content(
             filename,
             page_number,
             page_kbytes,
@@ -518,15 +517,15 @@ fn read_record_content_after_update() {
         ContentTypes::Int32(422),
         ContentTypes::Text("hello world".to_string()),
     ]);
-    file_processing::writing::update_record(filename, page_number, page_kbytes, 0, record)
+    page::writing::update_record(filename, page_number, page_kbytes, 0, record)
         .expect("Failed to update record");
 
     {
         // Read metadata first, then use it to read content
         let metadata =
-            file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+            page::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
                 .expect("Failed to read metadata");
-        let content = file_processing::reading::read_record_content(
+        let content = page::reading::read_record_content(
             filename,
             page_number,
             page_kbytes,
@@ -550,25 +549,25 @@ fn compact_page_no_fragmentation() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record = PageRecordContent::new(vec![
         ContentTypes::Int32(42),
         ContentTypes::Text("no fragmentation".to_string()),
     ]);
-    file_processing::writing::add_new_record(filename, page_number, page_kbytes, 1, record)
+    page::writing::add_new_record(filename, page_number, page_kbytes, 1, record)
         .expect("Failed to add record");
 
     let header_before =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
 
-    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+    page::writing::compact_page(filename, page_number, page_kbytes)
         .expect("Failed to compact page");
 
     let header_after =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
 
     assert_eq!(header_after.get_records_count(), header_before.get_records_count());
@@ -584,7 +583,7 @@ fn compact_page_all_deleted() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     for i in 0..3u64 {
@@ -592,30 +591,30 @@ fn compact_page_all_deleted() {
             ContentTypes::Int32(i as i32),
             ContentTypes::Text(format!("record_{}", i)),
         ]);
-        file_processing::writing::add_new_record(filename, page_number, page_kbytes, i, record)
+        page::writing::add_new_record(filename, page_number, page_kbytes, i, record)
             .expect("Failed to add record");
     }
 
     // Soft-delete records 0 and 1 (non-last)
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 0)
+    page::writing::delete_record(filename, page_number, page_kbytes, 0)
         .expect("Failed to delete record 0");
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 1)
+    page::writing::delete_record(filename, page_number, page_kbytes, 1)
         .expect("Failed to delete record 1");
     // Hard-delete record 2 (last slot)
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 2)
+    page::writing::delete_record(filename, page_number, page_kbytes, 2)
         .expect("Failed to delete record 2");
 
     let header_before =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
     assert!(header_before.get_fragment_space() > 0);
     assert_eq!(header_before.get_deleted_records_count(), 2);
 
-    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+    page::writing::compact_page(filename, page_number, page_kbytes)
         .expect("Failed to compact page");
 
     let header_after =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
 
     assert_eq!(header_after.get_records_count(), 0);
@@ -632,7 +631,7 @@ fn compact_page_after_soft_delete() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_0 = PageRecordContent::new(vec![
@@ -652,26 +651,26 @@ fn compact_page_after_soft_delete() {
     ]);
 
     for (i, record) in [record_0, record_1, record_2].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename, page_number, page_kbytes, i as u64, record,
         )
         .expect("Failed to add record");
     }
 
     // Soft-delete record 0 (non-last)
-    file_processing::writing::delete_record(filename, page_number, page_kbytes, 0)
+    page::writing::delete_record(filename, page_number, page_kbytes, 0)
         .expect("Failed to delete record 0");
 
     let header_before =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
     assert!(header_before.get_fragment_space() > 0);
 
-    file_processing::writing::compact_page(filename, page_number, page_kbytes)
+    page::writing::compact_page(filename, page_number, page_kbytes)
         .expect("Failed to compact page");
 
     let header_after =
-        file_processing::reading::read_page_header(filename, page_number, page_kbytes)
+        page::reading::read_page_header(filename, page_number, page_kbytes)
             .expect("Failed to read header");
 
     assert_eq!(header_after.get_records_count(), 2);
@@ -681,9 +680,9 @@ fn compact_page_after_soft_delete() {
 
     // Verify record 1 content (now at slot 0 after compaction)
     let metadata_0 =
-        file_processing::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
+        page::reading::read_record_metadata(filename, page_number, 0, page_kbytes)
             .expect("Failed to read metadata 0");
-    let content_0 = file_processing::reading::read_record_content(
+    let content_0 = page::reading::read_record_content(
         filename, page_number, page_kbytes, &metadata_0,
     )
     .expect("Failed to read content 0");
@@ -695,9 +694,9 @@ fn compact_page_after_soft_delete() {
 
     // Verify record 2 content (now at slot 1 after compaction)
     let metadata_1 =
-        file_processing::reading::read_record_metadata(filename, page_number, 1, page_kbytes)
+        page::reading::read_record_metadata(filename, page_number, 1, page_kbytes)
             .expect("Failed to read metadata 1");
-    let content_1 = file_processing::reading::read_record_content(
+    let content_1 = page::reading::read_record_content(
         filename, page_number, page_kbytes, &metadata_1,
     )
     .expect("Failed to read content 1");
@@ -716,7 +715,7 @@ fn write_page_roundtrip_multiple_records() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
     let record_0 = PageRecordContent::new(vec![
@@ -735,21 +734,21 @@ fn write_page_roundtrip_multiple_records() {
     ]);
 
     for (i, record) in [record_0, record_1, record_2].into_iter().enumerate() {
-        file_processing::writing::add_new_record(
+        page::writing::add_new_record(
             filename, page_number, page_kbytes, i as u64, record,
         )
         .expect("Failed to add record");
     }
 
     // Read the page built by add_new_record, then write it back with write_page
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read page");
 
-    file_processing::writing::write_page(filename, page_number, page_kbytes, &page)
+    page::writing::write_page(filename, page_number, page_kbytes, &page)
         .expect("Failed to write page");
 
     // Read back and verify all content survived the roundtrip
-    let page_after = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page_after = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read page after write_page");
 
     assert_eq!(page_after.header.get_records_count(), 3);
@@ -758,11 +757,11 @@ fn write_page_roundtrip_multiple_records() {
 
     // Verify each record's content via metadata-based read
     for i in 0..3 {
-        let meta = file_processing::reading::read_record_metadata(
+        let meta = page::reading::read_record_metadata(
             filename, page_number, i as u64, page_kbytes,
         )
         .expect("Failed to read metadata");
-        let content = file_processing::reading::read_record_content(
+        let content = page::reading::read_record_content(
             filename, page_number, page_kbytes, &meta,
         )
         .expect("Failed to read content");
@@ -780,17 +779,17 @@ fn write_page_empty() {
     let page_kbytes: u32 = 8;
     let page_number: u64 = 0;
 
-    file_processing::writing::write_new_page(filename, page_number, page_kbytes)
+    page::writing::write_new_page(filename, page_number, page_kbytes)
         .expect("Failed to write new page");
 
-    let page = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read page");
 
     // Write the empty page back
-    file_processing::writing::write_page(filename, page_number, page_kbytes, &page)
+    page::writing::write_page(filename, page_number, page_kbytes, &page)
         .expect("Failed to write page");
 
-    let page_after = file_processing::reading::read_page(filename, page_number, page_kbytes)
+    let page_after = page::reading::read_page(filename, page_number, page_kbytes)
         .expect("Failed to read page after write_page");
 
     assert_eq!(page_after.header.get_records_count(), 0);
@@ -806,9 +805,9 @@ fn write_page_to_second_page() {
     let page_kbytes: u32 = 8;
 
     // Create two pages
-    file_processing::writing::write_new_page(filename, 0, page_kbytes)
+    page::writing::write_new_page(filename, 0, page_kbytes)
         .expect("Failed to write page 0");
-    file_processing::writing::write_new_page(filename, 1, page_kbytes)
+    page::writing::write_new_page(filename, 1, page_kbytes)
         .expect("Failed to write page 1");
 
     // Add records to page 0
@@ -816,25 +815,25 @@ fn write_page_to_second_page() {
         ContentTypes::Int32(42),
         ContentTypes::Text("on page zero".to_string()),
     ]);
-    file_processing::writing::add_new_record(filename, 0, page_kbytes, 1, record)
+    page::writing::add_new_record(filename, 0, page_kbytes, 1, record)
         .expect("Failed to add record");
 
     // Read page 0, write it back
-    let page_0 = file_processing::reading::read_page(filename, 0, page_kbytes)
+    let page_0 = page::reading::read_page(filename, 0, page_kbytes)
         .expect("Failed to read page 0");
-    file_processing::writing::write_page(filename, 0, page_kbytes, &page_0)
+    page::writing::write_page(filename, 0, page_kbytes, &page_0)
         .expect("Failed to write page 0");
 
     // Verify page 1 was not affected
-    let page_1 = file_processing::reading::read_page(filename, 1, page_kbytes)
+    let page_1 = page::reading::read_page(filename, 1, page_kbytes)
         .expect("Failed to read page 1");
     assert_eq!(page_1.header.get_records_count(), 0);
     assert_eq!(page_1.header.get_free_space(), 8 * 1024 - 20);
 
     // Verify page 0 content is intact
-    let meta = file_processing::reading::read_record_metadata(filename, 0, 0, page_kbytes)
+    let meta = page::reading::read_record_metadata(filename, 0, 0, page_kbytes)
         .expect("Failed to read metadata");
-    let content = file_processing::reading::read_record_content(
+    let content = page::reading::read_record_content(
         filename, 0, page_kbytes, &meta,
     )
     .expect("Failed to read content");

@@ -2,13 +2,12 @@ use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::database_operations::file_processing::table::{
-    Page, PageHeader, PageRecordContent, PageRecordMetadata,
-};
+use super::header::PageHeader;
+use super::offsets;
+use super::page::Page;
+use super::record::{PageRecordContent, PageRecordMetadata};
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
-use crate::database_operations::file_processing::{
-    self, table_offsets, HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE,
-};
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
 
 /// Reads only the page header at the given page number.
 pub fn read_page_header(
@@ -44,7 +43,7 @@ pub fn read_page(
     };
 
     let page_size: usize = page_kbytes as usize * KBYTES;
-    let page_offset = file_processing::table_offsets::page_start_offset(page_number, page_size);
+    let page_offset = offsets::page_start_offset(page_number, page_size);
     let _ = match file.seek(SeekFrom::Start(page_offset)) {
         Ok(pos) => pos,
         Err(error) => {
@@ -85,7 +84,7 @@ pub fn read_page(
         let record_content_buffer_pos =
             record_metadata.get_bytes_offset() as usize;
         let record_content_size = record_metadata.get_bytes_content() as usize;
-        let record_content = PageRecordContent::from_bytes(&page_buffer[record_content_buffer_pos..record_content_buffer_pos + record_content_size])?; 
+        let record_content = PageRecordContent::from_bytes(&page_buffer[record_content_buffer_pos..record_content_buffer_pos + record_content_size])?;
 
         page.append_record(
             record_metadata,
@@ -141,7 +140,7 @@ pub fn read_record_content(
 
     let page_size: usize = page_kbytes as usize * KBYTES;
 
-    let absolute_file_start_offset = table_offsets::page_record_content_offset_absolute_file(
+    let absolute_file_start_offset = offsets::page_record_content_offset_absolute_file(
         page_number,
         page_size,
         record_metadata.get_bytes_offset() as u64,

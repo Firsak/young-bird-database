@@ -2,13 +2,12 @@ use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
-use crate::database_operations::file_processing::table::{
-    Page, PageHeader, PageRecordContent, PageRecordMetadata,
-};
+use super::header::PageHeader;
+use super::offsets;
+use super::page::Page;
+use super::record::{PageRecordContent, PageRecordMetadata};
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
-use crate::database_operations::file_processing::{
-    self, HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE,
-};
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
 
 /// Overwrites the header of an existing page. The page must already exist in the file.
 pub fn write_page_header(
@@ -464,7 +463,7 @@ pub fn compact_page(
     page_number: u64,
     page_kbytes: u32,
 ) -> Result<(), Box<dyn Error>> {
-    let old_page = file_processing::reading::read_page(filename, page_number, page_kbytes)?;
+    let old_page = super::reading::read_page(filename, page_number, page_kbytes)?;
 
     if old_page.header.get_fragment_space() == 0 {
         return Ok(());
@@ -494,7 +493,7 @@ pub fn compact_page(
             }
         };
         let new_content_offset =
-            file_processing::table_offsets::page_record_content_offset_relative_page_end(
+            offsets::page_record_content_offset_relative_page_end(
                 page_size,
                 last_record,
                 old_metadata.get_bytes_content() as usize,
@@ -519,5 +518,5 @@ pub fn compact_page(
         new_page.append_record(new_metadata, new_content);
     }
 
-    file_processing::writing::write_page(filename, page_number, page_kbytes, &new_page)
+    write_page(filename, page_number, page_kbytes, &new_page)
 }

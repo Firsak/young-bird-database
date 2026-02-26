@@ -24,8 +24,8 @@
 //! └─────────────────────────────────────┘  ← page end
 //! ```
 
-use super::table::PageRecordMetadata;
-use super::{HEADER_SIZE, PAGE_RECORD_METADATE_SIZE};
+use super::record::PageRecordMetadata;
+use crate::database_operations::file_processing::{HEADER_SIZE, PAGE_RECORD_METADATE_SIZE};
 
 /// Calculates the absolute byte offset from file start where a page begins.
 ///
