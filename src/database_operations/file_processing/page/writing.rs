@@ -101,57 +101,67 @@ pub fn add_new_record(
     };
 
     let page_size: usize = page_kbytes as usize * KBYTES;
-    let page_pos = page_number * (page_size as u64);
 
     let mut page_header = PageHeader::read_from_file(
         &mut file,
-        page_number * (page_size as u64),
+        offsets::page_header_offset(page_number, page_size),
         page_size,
         filename,
     )?;
 
-    let next_record_metadata_index = page_header.get_records_count();
-    let next_record_metadata_pos = page_pos
-        + (HEADER_SIZE as u64)
-        + (next_record_metadata_index as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
     let record_content_bytes = record_content.to_bytes();
     let record_content_length = record_content_bytes.len();
-    let record_content_pos = if next_record_metadata_index == 0 {
-        (page_size as u64) - (record_content_length as u64)
-    } else {
-        let last_record_metadata_pos = page_pos
-            + (HEADER_SIZE as u64)
-            + ((page_header.get_records_count() - 1) as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
-        let last_record_metadata = PageRecordMetadata::read_from_file(
-            &mut file,
-            last_record_metadata_pos,
-            PAGE_RECORD_METADATE_SIZE,
-            filename,
-        )?;
-        (last_record_metadata.get_bytes_offset() as u64) - (record_content_length as u64)
-    };
 
     if record_content_length + PAGE_RECORD_METADATE_SIZE > page_header.get_free_space() as usize {
         return Err("Not enough bytes to write in this page".into());
     };
 
+    let next_record_index = page_header.get_records_count();
+    let next_metadata_pos =
+        offsets::page_record_metadata_offset(page_number, page_size, next_record_index);
+
+    let last_record = if next_record_index == 0 {
+        None
+    } else {
+        let last_metadata_pos =
+            offsets::page_record_metadata_offset(page_number, page_size, next_record_index - 1);
+        Some(PageRecordMetadata::read_from_file(
+            &mut file,
+            last_metadata_pos,
+            PAGE_RECORD_METADATE_SIZE,
+            filename,
+        )?)
+    };
+
+    let content_pos = offsets::page_record_content_offset_relative_page_end(
+        page_size,
+        last_record.as_ref(),
+        record_content_length,
+    );
+
     let record_metadata = PageRecordMetadata::new(
         record_id,
-        record_content_pos as u32,
+        content_pos as u32,
         record_content_length as u32,
         false,
     );
 
-    record_metadata.write_to_file(&mut file, next_record_metadata_pos, filename)?;
+    record_metadata.write_to_file(&mut file, next_metadata_pos, filename)?;
 
-    record_content.write_to_file(&mut file, page_pos + record_content_pos, filename)?;
+    let content_abs_pos =
+        offsets::page_record_content_offset_absolute_file(page_number, page_size, content_pos);
+    record_content.write_to_file(&mut file, content_abs_pos, filename)?;
 
     page_header.update_records_count(page_header.get_records_count() + 1);
     page_header.update_free_space(
         page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATE_SIZE) as u32,
     );
 
-    page_header.write_to_file(&mut file, page_number * (page_size as u64), filename)?;
+    page_header.write_to_file(
+        &mut file,
+        offsets::page_header_offset(page_number, page_size),
+        filename,
+    )?;
 
     Ok(())
 }
@@ -492,12 +502,11 @@ pub fn compact_page(
                 Some(&new_page.get_records_metadata()[new_page.get_records_metadata().len() - 1])
             }
         };
-        let new_content_offset =
-            offsets::page_record_content_offset_relative_page_end(
-                page_size,
-                last_record,
-                old_metadata.get_bytes_content() as usize,
-            );
+        let new_content_offset = offsets::page_record_content_offset_relative_page_end(
+            page_size,
+            last_record,
+            old_metadata.get_bytes_content() as usize,
+        );
         let new_metadata = PageRecordMetadata::new(
             old_metadata.get_id(),
             new_content_offset as u32,

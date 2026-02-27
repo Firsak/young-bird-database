@@ -1,9 +1,12 @@
-use std::error::Error;
-
 use super::table_header::TableHeader;
-use crate::database_operations::file_processing::page::writing::write_new_page;
+use crate::database_operations::file_processing::errors::DatabaseError;
+use crate::database_operations::file_processing::page::reading::read_page_header;
+use crate::database_operations::file_processing::page::record::PageRecordContent;
+use crate::database_operations::file_processing::page::writing::{add_new_record, write_new_page};
 use crate::database_operations::file_processing::table::reading::read_table_header;
 use crate::database_operations::file_processing::table::writing::write_table_header;
+use crate::database_operations::file_processing::traits::BinarySerde;
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
 
 /// High-level Table API. Wraps a TableHeader and resolves
 /// global page numbers to concrete (filename, local_page) pairs.
@@ -52,7 +55,7 @@ impl Table {
         name: String,
         base_path: String,
         pages_per_file: u32,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DatabaseError> {
         let meta_path = format!("{}/{}.meta", base_path, name);
         let header = read_table_header(&meta_path)?;
         Ok(Self {
@@ -71,9 +74,11 @@ impl Table {
         pages_per_file: u32,
         page_kbytes: u32,
         columns: Vec<super::column_def::ColumnDef>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, DatabaseError> {
         if pages_per_file < 1 {
-            return Err("Pages per file should be more than 0".into());
+            return Err(DatabaseError::InvalidArgument(
+                "Pages per file should be more than 0".to_string(),
+            ));
         }
         let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, columns);
         let table = Table::new(name, base_path, pages_per_file, table_header);
@@ -90,6 +95,57 @@ impl Table {
         &mut self.header
     }
 
+    /// Inserts a record into the table. Tries the last page first;
+    /// if it doesn't have enough space, creates a new page.
+    /// Updates the .meta file after changes.
+    pub fn insert_record(
+        &mut self,
+        record_id: u64,
+        record_content: PageRecordContent,
+    ) -> Result<(), DatabaseError> {
+        let page_kbytes = self.header.get_page_kbytes();
+        let record_size = record_content.to_bytes().len() + PAGE_RECORD_METADATE_SIZE;
+
+        if record_size + HEADER_SIZE > (page_kbytes as usize * KBYTES) {
+            return Err(DatabaseError::RecordTooLarge);
+        }
+
+        let last_page_number = self.get_header().get_pages_count() - 1;
+        let last_page_filename = self.resolve_file(last_page_number)?;
+
+        let last_page_header = read_page_header(
+            &last_page_filename.filename,
+            last_page_filename.local_page_number,
+            page_kbytes,
+        )?;
+
+        let filename_for_desired_page = if last_page_header.get_free_space() < record_size as u32 {
+            let new_page_count = self.get_header().get_pages_count() + 1;
+            self.get_header_mut().update_pages_count(new_page_count);
+            write_table_header(&self.meta_path(), self.get_header())?;
+
+            let desired_page_number = last_page_number + 1;
+            let filename_for_desired_page = self.resolve_file(desired_page_number)?;
+            write_new_page(
+                &filename_for_desired_page.filename,
+                filename_for_desired_page.local_page_number,
+                page_kbytes,
+            )?;
+            filename_for_desired_page
+        } else {
+            last_page_filename
+        };
+        add_new_record(
+            &filename_for_desired_page.filename,
+            filename_for_desired_page.local_page_number,
+            page_kbytes,
+            record_id,
+            record_content,
+        )?;
+
+        Ok(())
+    }
+
     /// Given a global page number, returns the .dat filename and
     /// the local page number within that file.
     ///
@@ -99,12 +155,13 @@ impl Table {
     ///   filename          = "{base_path}/{name}_{file_index}.dat"
     ///
     /// Returns Err if global_page_number >= pages_count.
-    pub fn resolve_file(&self, global_page_number: u64) -> Result<ResolvedPage, String> {
+    pub fn resolve_file(&self, global_page_number: u64) -> Result<ResolvedPage, DatabaseError> {
         if global_page_number >= self.header.get_pages_count() {
-            return Err(format!(
-                "Page number is greater than total pages in the table: {}",
+            return Err(DatabaseError::InvalidArgument(format!(
+                "Page number {} is out of bounds (total pages: {})",
+                global_page_number,
                 self.header.get_pages_count()
-            ));
+            )));
         }
         let file_index = global_page_number / self.pages_per_file as u64;
         let local_page_number = global_page_number % self.pages_per_file as u64;
