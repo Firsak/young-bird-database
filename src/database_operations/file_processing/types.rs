@@ -1,3 +1,4 @@
+use std::fmt;
 use super::traits::BinarySerde;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -31,6 +32,45 @@ pub enum ColumnTypes {
     UInt64,  //  9
     Float32, // 10
     Float64, // 11
+}
+
+impl fmt::Display for ContentTypes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContentTypes::Null => write!(f, "Null"),
+            ContentTypes::Boolean(_) => write!(f, "Boolean"),
+            ContentTypes::Text(_) => write!(f, "Text"),
+            ContentTypes::Int8(_) => write!(f, "Int8"),
+            ContentTypes::Int16(_) => write!(f, "Int16"),
+            ContentTypes::Int32(_) => write!(f, "Int32"),
+            ContentTypes::Int64(_) => write!(f, "Int64"),
+            ContentTypes::UInt8(_) => write!(f, "UInt8"),
+            ContentTypes::UInt16(_) => write!(f, "UInt16"),
+            ContentTypes::UInt32(_) => write!(f, "UInt32"),
+            ContentTypes::UInt64(_) => write!(f, "UInt64"),
+            ContentTypes::Float32(_) => write!(f, "Float32"),
+            ContentTypes::Float64(_) => write!(f, "Float64"),
+        }
+    }
+}
+
+impl fmt::Display for ColumnTypes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ColumnTypes::Boolean => write!(f, "Boolean"),
+            ColumnTypes::Text => write!(f, "Text"),
+            ColumnTypes::Int8 => write!(f, "Int8"),
+            ColumnTypes::Int16 => write!(f, "Int16"),
+            ColumnTypes::Int32 => write!(f, "Int32"),
+            ColumnTypes::Int64 => write!(f, "Int64"),
+            ColumnTypes::UInt8 => write!(f, "UInt8"),
+            ColumnTypes::UInt16 => write!(f, "UInt16"),
+            ColumnTypes::UInt32 => write!(f, "UInt32"),
+            ColumnTypes::UInt64 => write!(f, "UInt64"),
+            ColumnTypes::Float32 => write!(f, "Float32"),
+            ColumnTypes::Float64 => write!(f, "Float64"),
+        }
+    }
 }
 
 impl BinarySerde for ColumnTypes {

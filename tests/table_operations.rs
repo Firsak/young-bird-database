@@ -596,3 +596,105 @@ fn update_record_cross_page() {
 
     cleanup_dir(&dir);
 }
+
+// ══════════════════════════════════════════════════════════
+// Schema validation integration tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn insert_valid_record_passes_validation() {
+    let (mut table, dir) = create_test_table("valid_record");
+
+    // Table has [Int64, Text] — this matches
+    table.insert_record(1, make_record(1, "valid")).expect("Valid record should insert");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn insert_wrong_column_count() {
+    let (mut table, dir) = create_test_table("wrong_col_count");
+
+    // Table expects 2 columns, provide 1
+    let record = PageRecordContent::new(vec![ContentTypes::Int64(1)]);
+    let result = table.insert_record(1, record);
+    assert!(result.is_err(), "Should reject wrong column count");
+
+    // Provide 3
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Int64(1),
+        ContentTypes::Text("a".to_string()),
+        ContentTypes::Boolean(true),
+    ]);
+    let result = table.insert_record(2, record);
+    assert!(result.is_err(), "Should reject extra columns");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn insert_wrong_type() {
+    let (mut table, dir) = create_test_table("wrong_type");
+
+    // Table expects [Int64, Text], provide [Text, Int64] (swapped)
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Text("oops".to_string()),
+        ContentTypes::Int64(42),
+    ]);
+    let result = table.insert_record(1, record);
+    assert!(result.is_err(), "Should reject type mismatch");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn insert_null_in_non_nullable_column() {
+    let (mut table, dir) = create_test_table("null_non_nullable");
+
+    // Table has [Int64(non-nullable), Text(nullable)]
+    // Null in first column should fail
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Null,
+        ContentTypes::Text("ok".to_string()),
+    ]);
+    let result = table.insert_record(1, record);
+    assert!(result.is_err(), "Should reject null in non-nullable column");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn insert_null_in_nullable_column() {
+    let (mut table, dir) = create_test_table("null_nullable");
+
+    // Table has [Int64(non-nullable), Text(nullable)]
+    // Null in second column (nullable) should succeed
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Int64(1),
+        ContentTypes::Null,
+    ]);
+    table.insert_record(1, record).expect("Null in nullable column should be accepted");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn update_with_wrong_schema_rejected() {
+    let (mut table, dir) = create_test_table("update_wrong_schema");
+
+    table.insert_record(1, make_record(1, "original")).expect("Insert should work");
+
+    // Try to update with wrong types
+    let bad_record = PageRecordContent::new(vec![
+        ContentTypes::Boolean(true),
+        ContentTypes::Int32(42),
+    ]);
+    let result = table.update_record(1, bad_record);
+    assert!(result.is_err(), "Should reject schema-violating update");
+
+    // Original record should be untouched
+    let content = table.read_record(1).expect("Original should survive");
+    assert_eq!(content.get_content()[1], ContentTypes::Text("original".to_string()));
+
+    cleanup_dir(&dir);
+}

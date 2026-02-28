@@ -15,6 +15,8 @@ pub enum DatabaseError {
     InvalidArgument(String),
     /// Binary serialization/deserialization failure.
     Serialization(String),
+    /// Record content doesn't match table schema.
+    SchemaViolation(String),
 }
 
 impl fmt::Display for DatabaseError {
@@ -26,6 +28,7 @@ impl fmt::Display for DatabaseError {
             DatabaseError::RecordNotFound(id) => write!(f, "Record not found: id {}", id),
             DatabaseError::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
             DatabaseError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
+            DatabaseError::SchemaViolation(msg) => write!(f, "Schema violation: {}", msg),
         }
     }
 }

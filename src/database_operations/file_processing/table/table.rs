@@ -8,7 +8,9 @@ use crate::database_operations::file_processing::page::writing::{
 };
 use crate::database_operations::file_processing::table::reading::read_table_header;
 use crate::database_operations::file_processing::table::writing::write_table_header;
+use crate::database_operations::file_processing::table::ColumnDef;
 use crate::database_operations::file_processing::traits::BinarySerde;
+use crate::database_operations::file_processing::types::{ColumnTypes, ContentTypes};
 use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
 /// High-level Table API. Wraps a TableHeader and resolves
@@ -98,6 +100,72 @@ impl Table {
         &mut self.header
     }
 
+    /// Checks that a non-null value's type matches the column definition.
+    /// Null values should be handled by the caller (validate_record) before
+    /// calling this — reaching Null here is a programming error (InvalidArgument).
+    fn compare_column_def_and_value_helper(
+        column_def: &ColumnDef,
+        value: &ContentTypes,
+    ) -> Result<(), DatabaseError> {
+        match (value, column_def.get_data_type()) {
+            // All valid (ContentTypes variant, ColumnTypes variant) pairs
+            (ContentTypes::Boolean(_), ColumnTypes::Boolean) => Ok(()),
+            (ContentTypes::Text(_), ColumnTypes::Text) => Ok(()),
+            (ContentTypes::Int8(_), ColumnTypes::Int8) => Ok(()),
+            (ContentTypes::Int16(_), ColumnTypes::Int16) => Ok(()),
+            (ContentTypes::Int32(_), ColumnTypes::Int32) => Ok(()),
+            (ContentTypes::Int64(_), ColumnTypes::Int64) => Ok(()),
+            (ContentTypes::UInt8(_), ColumnTypes::UInt8) => Ok(()),
+            (ContentTypes::UInt16(_), ColumnTypes::UInt16) => Ok(()),
+            (ContentTypes::UInt32(_), ColumnTypes::UInt32) => Ok(()),
+            (ContentTypes::UInt64(_), ColumnTypes::UInt64) => Ok(()),
+            (ContentTypes::Float32(_), ColumnTypes::Float32) => Ok(()),
+            (ContentTypes::Float64(_), ColumnTypes::Float64) => Ok(()),
+            // Null should not reach here — caller checks nullability first
+            (ContentTypes::Null, _) => Err(DatabaseError::InvalidArgument(
+                "Nullable values can not be matched".to_string(),
+            )),
+            // Any other combination is a type mismatch
+            _ => Err(DatabaseError::SchemaViolation(format!(
+                "Column '{}': expected {}, got {}",
+                column_def.get_name(),
+                column_def.get_data_type(),
+                value,
+            ))),
+        }
+    }
+
+    /// Validates that a record's content matches the table schema.
+    /// Checks column count, type compatibility, and nullability.
+    fn validate_record(&self, record_content: &PageRecordContent) -> Result<(), DatabaseError> {
+        let values = record_content.get_content();
+        let column_defs = self.header.get_column_defs();
+
+        if column_defs.len() != values.len() {
+            return Err(DatabaseError::SchemaViolation(format!(
+                "Expected {} columns, got {}",
+                column_defs.len(),
+                values.len()
+            )));
+        }
+
+        for (column_def, value) in column_defs.iter().zip(values.iter()) {
+            match value {
+                ContentTypes::Null => {
+                    if !column_def.get_nullable() {
+                        return Err(DatabaseError::SchemaViolation(format!(
+                            "Column \"{}\" is not nullable",
+                            column_def.get_name()
+                        )));
+                    }
+                }
+                _ => Self::compare_column_def_and_value_helper(column_def, value)?,
+            }
+        }
+
+        Ok(())
+    }
+
     /// Inserts a record into the table. Tries the last page first;
     /// if it doesn't have enough space, creates a new page.
     /// Updates the .meta file after changes.
@@ -106,6 +174,8 @@ impl Table {
         record_id: u64,
         record_content: PageRecordContent,
     ) -> Result<(), DatabaseError> {
+        self.validate_record(&record_content)?;
+
         let page_kbytes = self.header.get_page_kbytes();
         let record_size = record_content.to_bytes().len() + PAGE_RECORD_METADATA_SIZE;
 
@@ -206,6 +276,8 @@ impl Table {
         record_id: u64,
         record_content: PageRecordContent,
     ) -> Result<(), DatabaseError> {
+        self.validate_record(&record_content)?;
+
         let page_kbytes = self.header.get_page_kbytes();
         let pages_count = self.header.get_pages_count();
 
@@ -223,7 +295,12 @@ impl Table {
                 Err(error) => match error {
                     DatabaseError::RecordNotFound(_) => continue,
                     DatabaseError::PageFull => {
-                        page_delete_record(&resolved_filename.filename, resolved_filename.local_page_index, page_kbytes, record_id)?;
+                        page_delete_record(
+                            &resolved_filename.filename,
+                            resolved_filename.local_page_index,
+                            page_kbytes,
+                            record_id,
+                        )?;
                         self.insert_record(record_id, record_content)?;
                         return Ok(());
                     }

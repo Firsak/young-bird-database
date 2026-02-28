@@ -16,6 +16,18 @@ impl ColumnDef {
             name,
         }
     }
+
+    pub fn get_data_type(&self) -> &ColumnTypes {
+        &self.data_type
+    }
+
+    pub fn get_nullable(&self) -> bool {
+        self.nullable
+    }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl BinarySerde for ColumnDef {

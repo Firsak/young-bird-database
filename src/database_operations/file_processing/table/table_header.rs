@@ -37,6 +37,10 @@ impl TableHeader {
         self.page_kbytes
     }
 
+    pub fn get_column_defs(&self) -> &Vec<ColumnDef> {
+        &self.header
+    }
+
     pub fn update_pages_count(&mut self, new_count: u64) {
         self.pages_count = new_count;
     }
