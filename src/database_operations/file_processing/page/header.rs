@@ -7,7 +7,7 @@ use crate::database_operations::file_processing::HEADER_SIZE;
 #[derive(Debug)]
 pub struct PageHeader {
     // 20 bytes
-    pub(in crate::database_operations::file_processing) page_id: u64, // 8 bytes
+    pub(in crate::database_operations::file_processing) page_number: u64, // 8 bytes
     records_count: u16,                                               // 2 bytes
     deleted_count: u16,                                               // 2 bytes
     free_space: u32,                                                  // 4 bytes
@@ -16,14 +16,14 @@ pub struct PageHeader {
 
 impl PageHeader {
     pub fn new(
-        page_id: u64,
+        page_number: u64,
         records_count: u16,
         deleted_count: u16,
         free_space: u32,
         fragmented_space: u32,
     ) -> Self {
         Self {
-            page_id,
+            page_number,
             records_count,
             deleted_count,
             free_space,
@@ -68,10 +68,10 @@ impl BinarySerde for PageHeader {
     type Output = [u8; HEADER_SIZE]; // Fixed size array
 
     /// Serializes the PageHeader into a 20-byte array in little-endian format.
-    /// Memory layout: [page_id: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
+    /// Memory layout: [page_number: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
     fn to_bytes(&self) -> Self::Output {
         let mut bytes = [0u8; HEADER_SIZE];
-        bytes[0..8].copy_from_slice(&self.page_id.to_le_bytes());
+        bytes[0..8].copy_from_slice(&self.page_number.to_le_bytes());
         bytes[8..10].copy_from_slice(&self.records_count.to_le_bytes());
         bytes[10..12].copy_from_slice(&self.deleted_count.to_le_bytes());
         bytes[12..16].copy_from_slice(&self.free_space.to_le_bytes());
@@ -91,14 +91,14 @@ impl BinarySerde for PageHeader {
             ));
         }
 
-        let page_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let page_number = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let records_count = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
         let deleted_count = u16::from_le_bytes(bytes[10..12].try_into().unwrap());
         let free_space = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         let fragmented_space = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
 
         Ok(Self {
-            page_id,
+            page_number,
             records_count,
             deleted_count,
             free_space,
@@ -184,14 +184,14 @@ mod tests {
     }
 
     // Verify the exact binary layout matches what we documented:
-    // [page_id: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
+    // [page_number: 8][records_count: 2][deleted_count: 2][free_space: 4][fragmented_space: 4]
     #[test]
     fn page_header_byte_layout() {
         let header = PageHeader::new(1, 2, 3, 4, 5);
         let bytes = header.to_bytes();
 
         assert_eq!(bytes.len(), HEADER_SIZE); // should be 20
-        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), 1); // page_id
+        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), 1); // page_number
         assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 2); // records_count
         assert_eq!(u16::from_le_bytes(bytes[10..12].try_into().unwrap()), 3); // deleted_count
         assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()), 4); // free_space

@@ -3,23 +3,23 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::types::ContentTypes;
-use crate::database_operations::file_processing::PAGE_RECORD_METADATE_SIZE;
+use crate::database_operations::file_processing::PAGE_RECORD_METADATA_SIZE;
 
 #[derive(Debug)]
 pub struct PageRecordMetadata {
-    // 20 bytes: [id: 8][bytes_offset: 4][bytes_content: 4][is_deleted: 1][padding: 3]
+    // 20 bytes: [id: 8][content_offset: 4][content_size: 4][is_deleted: 1][padding: 3]
     id: u64,
-    bytes_offset: u32,
-    bytes_content: u32,
+    content_offset: u32,
+    content_size: u32,
     is_deleted: bool,
 }
 
 impl PageRecordMetadata {
-    pub fn new(id: u64, bytes_offset: u32, bytes_content: u32, is_deleted: bool) -> Self {
+    pub fn new(id: u64, content_offset: u32, content_size: u32, is_deleted: bool) -> Self {
         Self {
             id,
-            bytes_offset,
-            bytes_content,
+            content_offset,
+            content_size,
             is_deleted,
         }
     }
@@ -28,12 +28,12 @@ impl PageRecordMetadata {
         self.id
     }
 
-    pub fn get_bytes_offset(&self) -> u32 {
-        self.bytes_offset
+    pub fn get_content_offset(&self) -> u32 {
+        self.content_offset
     }
 
-    pub fn get_bytes_content(&self) -> u32 {
-        self.bytes_content
+    pub fn get_content_size(&self) -> u32 {
+        self.content_size
     }
 
     pub fn get_is_deleted(&self) -> bool {
@@ -44,23 +44,23 @@ impl PageRecordMetadata {
         self.is_deleted = is_deleted;
     }
 
-    pub fn set_bytes_content(&mut self, new_bytes_content_length: u32) {
-        self.bytes_content = new_bytes_content_length;
+    pub fn set_content_size(&mut self, new_content_size_length: u32) {
+        self.content_size = new_content_size_length;
     }
 
-    pub fn set_bytes_offset(&mut self, new_bytes_offset: u32) {
-        self.bytes_offset = new_bytes_offset;
+    pub fn set_content_offset(&mut self, new_content_offset: u32) {
+        self.content_offset = new_content_offset;
     }
 }
 
 impl BinarySerde for PageRecordMetadata {
-    type Output = [u8; PAGE_RECORD_METADATE_SIZE]; // Fixed size array
+    type Output = [u8; PAGE_RECORD_METADATA_SIZE]; // Fixed size array
 
     fn to_bytes(&self) -> Self::Output {
-        let mut bytes = [0u8; PAGE_RECORD_METADATE_SIZE];
+        let mut bytes = [0u8; PAGE_RECORD_METADATA_SIZE];
         bytes[0..8].copy_from_slice(&self.id.to_le_bytes());
-        bytes[8..12].copy_from_slice(&self.bytes_offset.to_le_bytes());
-        bytes[12..16].copy_from_slice(&self.bytes_content.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.content_offset.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.content_size.to_le_bytes());
         bytes[16..17].copy_from_slice(&[if self.is_deleted { 1u8 } else { 0u8 }]);
         bytes
     }
@@ -69,22 +69,22 @@ impl BinarySerde for PageRecordMetadata {
         if bytes.is_empty() {
             return Err("PageRecord deserialization failed: byte slice is empty".to_string());
         }
-        if bytes.len() != PAGE_RECORD_METADATE_SIZE {
+        if bytes.len() != PAGE_RECORD_METADATA_SIZE {
             return Err(format!(
-                "PageRecord deserialization failed: expected exactly {} bytes (8 for id + 4 for bytes_offset + 4 for bytes_content), got {} bytes",
-                PAGE_RECORD_METADATE_SIZE, bytes.len()
+                "PageRecord deserialization failed: expected exactly {} bytes (8 for id + 4 for content_offset + 4 for content_size), got {} bytes",
+                PAGE_RECORD_METADATA_SIZE, bytes.len()
             ));
         }
 
         let id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let bytes_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let bytes_content = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let content_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let content_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         let is_deleted = bytes[16] == 1u8;
 
         Ok(Self {
             id,
-            bytes_offset,
-            bytes_content,
+            content_offset,
+            content_size,
             is_deleted,
         })
     }
@@ -149,6 +149,12 @@ impl ReadWrite for PageRecordMetadata {
 #[derive(Debug)]
 pub struct PageRecordContent {
     content: Vec<ContentTypes>,
+}
+
+impl Clone for PageRecordContent {
+    fn clone(&self) -> Self {
+        PageRecordContent { content: self.get_content().clone() }
+    }
 }
 
 impl PageRecordContent {
@@ -282,8 +288,8 @@ mod tests {
         let restored = PageRecordMetadata::from_bytes(&bytes).unwrap();
 
         assert_eq!(restored.get_id(), 99);
-        assert_eq!(restored.get_bytes_offset(), 4096);
-        assert_eq!(restored.get_bytes_content(), 256);
+        assert_eq!(restored.get_content_offset(), 4096);
+        assert_eq!(restored.get_content_size(), 256);
     }
 
     #[test]

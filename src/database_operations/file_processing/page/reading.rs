@@ -7,7 +7,7 @@ use super::offsets;
 use super::page::Page;
 use super::record::{PageRecordContent, PageRecordMetadata};
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
-use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
 /// Reads only the page header at the given page number.
 pub fn read_page_header(
@@ -71,10 +71,10 @@ pub fn read_page(
     );
 
     for index in 0..page.header.get_records_count() {
-        let record_metadata_buffer_pos = HEADER_SIZE + index as usize * PAGE_RECORD_METADATE_SIZE;
+        let record_metadata_buffer_pos = HEADER_SIZE + index as usize * PAGE_RECORD_METADATA_SIZE;
         let record_metadata = PageRecordMetadata::from_bytes(
             &page_buffer[record_metadata_buffer_pos
-                ..record_metadata_buffer_pos + PAGE_RECORD_METADATE_SIZE],
+                ..record_metadata_buffer_pos + PAGE_RECORD_METADATA_SIZE],
         )?;
 
         if record_metadata.get_is_deleted() {
@@ -82,8 +82,8 @@ pub fn read_page(
         }
 
         let record_content_buffer_pos =
-            record_metadata.get_bytes_offset() as usize;
-        let record_content_size = record_metadata.get_bytes_content() as usize;
+            record_metadata.get_content_offset() as usize;
+        let record_content_size = record_metadata.get_content_size() as usize;
         let record_content = PageRecordContent::from_bytes(&page_buffer[record_content_buffer_pos..record_content_buffer_pos + record_content_size])?;
 
         page.append_record(
@@ -99,7 +99,7 @@ pub fn read_page(
 pub fn read_record_metadata(
     filename: &str,
     page_number: u64,
-    record_metadata_index: u64,
+    slot_index: u16,
     page_kbytes: u32,
 ) -> Result<PageRecordMetadata, Box<dyn Error>> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
@@ -113,12 +113,12 @@ pub fn read_record_metadata(
     let size: usize = page_kbytes as usize * KBYTES;
     let record_metadata_pos: u64 = page_number * (size as u64)
         + (HEADER_SIZE as u64)
-        + (PAGE_RECORD_METADATE_SIZE as u64 * record_metadata_index);
+        + (PAGE_RECORD_METADATA_SIZE as u64 * slot_index as u64);
 
     PageRecordMetadata::read_from_file(
         &mut file,
         record_metadata_pos,
-        PAGE_RECORD_METADATE_SIZE,
+        PAGE_RECORD_METADATA_SIZE,
         filename,
     )
 }
@@ -143,8 +143,8 @@ pub fn read_record_content(
     let absolute_file_start_offset = offsets::page_record_content_offset_absolute_file(
         page_number,
         page_size,
-        record_metadata.get_bytes_offset() as u64,
+        record_metadata.get_content_offset() as u64,
     );
-    let size = record_metadata.get_bytes_content() as usize;
+    let size = record_metadata.get_content_size() as usize;
     PageRecordContent::read_from_file(&mut file, absolute_file_start_offset, size, filename)
 }

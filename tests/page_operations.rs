@@ -147,7 +147,7 @@ fn add_multiple_records_and_read() {
         let record_metadata = page::reading::read_record_metadata(
             filename,
             page_number,
-            index as u64,
+            index as u16,
             page_kbytes,
         )
         .expect(&format!("Failed reading the record {} metadata", index));
@@ -758,7 +758,7 @@ fn write_page_roundtrip_multiple_records() {
     // Verify each record's content via metadata-based read
     for i in 0..3 {
         let meta = page::reading::read_record_metadata(
-            filename, page_number, i as u64, page_kbytes,
+            filename, page_number, i as u16, page_kbytes,
         )
         .expect("Failed to read metadata");
         let content = page::reading::read_record_content(
@@ -766,7 +766,7 @@ fn write_page_roundtrip_multiple_records() {
         )
         .expect("Failed to read content");
 
-        let original_content = page.get_record_content_by_metadata_index(i);
+        let original_content = page.get_record_content_by_slot_index(i);
         assert_eq!(content.to_bytes(), original_content.to_bytes());
     }
 

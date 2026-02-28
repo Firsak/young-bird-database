@@ -227,7 +227,7 @@ fn insert_single_record() {
 
     // Read the first page and verify the record is there
     let resolved = table.resolve_file(0).unwrap();
-    let page = read_page(&resolved.filename, resolved.local_page_number, 8).unwrap();
+    let page = read_page(&resolved.filename, resolved.local_page_index, 8).unwrap();
 
     assert_eq!(page.header.get_records_count(), 1);
 
@@ -245,7 +245,7 @@ fn insert_multiple_records() {
     }
 
     let resolved = table.resolve_file(0).unwrap();
-    let page = read_page(&resolved.filename, resolved.local_page_number, 8).unwrap();
+    let page = read_page(&resolved.filename, resolved.local_page_index, 8).unwrap();
 
     assert_eq!(page.header.get_records_count(), 5);
 
@@ -294,7 +294,7 @@ fn insert_and_reopen_table() {
 
     // Read the page and verify the record survived
     let resolved = reopened.resolve_file(0).unwrap();
-    let page = read_page(&resolved.filename, resolved.local_page_number, 8).unwrap();
+    let page = read_page(&resolved.filename, resolved.local_page_index, 8).unwrap();
 
     assert_eq!(page.header.get_records_count(), 1);
 
@@ -325,6 +325,274 @@ fn insert_new_page_and_reopen() {
         reopened.get_header().get_pages_count(),
         "pages_count should match after reopen"
     );
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Table::read_record integration tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn read_single_record() {
+    let (mut table, dir) = create_test_table("read_single");
+
+    table
+        .insert_record(42, make_record(42, "hello"))
+        .expect("Failed to insert");
+
+    let content = table.read_record(42).expect("Failed to read record");
+    let values = content.get_content();
+
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0], ContentTypes::Int64(42));
+    assert_eq!(values[1], ContentTypes::Text("hello".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn read_nonexistent_record() {
+    let (mut table, dir) = create_test_table("read_nonexistent");
+
+    table
+        .insert_record(1, make_record(1, "exists"))
+        .expect("Failed to insert");
+
+    let result = table.read_record(999);
+    assert!(result.is_err(), "Should return error for nonexistent record");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn read_record_from_second_page() {
+    let (mut table, dir) = create_test_table("read_from_second_page");
+
+    // Fill with large records to force multiple pages
+    let big_name = "z".repeat(2000);
+    for i in 1..=10 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect(&format!("Failed to insert record {}", i));
+    }
+
+    assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
+
+    // Read a record that should be on a later page
+    let content = table.read_record(10).expect("Failed to read record 10");
+    let values = content.get_content();
+
+    assert_eq!(values[0], ContentTypes::Int64(10));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn read_multiple_records() {
+    let (mut table, dir) = create_test_table("read_multiple");
+
+    for i in 1..=5 {
+        table
+            .insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("Failed to insert");
+    }
+
+    // Read each record back and verify content
+    for i in 1..=5u64 {
+        let content = table.read_record(i).expect(&format!("Failed to read record {}", i));
+        let values = content.get_content();
+        assert_eq!(values[0], ContentTypes::Int64(i as i64));
+        assert_eq!(values[1], ContentTypes::Text(format!("item_{}", i)));
+    }
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Table::delete_record integration tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn delete_single_record() {
+    let (mut table, dir) = create_test_table("delete_single");
+
+    table.insert_record(1, make_record(1, "to_delete")).expect("Failed to insert");
+
+    table.delete_record(1).expect("Failed to delete");
+
+    let result = table.read_record(1);
+    assert!(result.is_err(), "Deleted record should not be readable");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn delete_nonexistent_record() {
+    let (mut table, dir) = create_test_table("delete_nonexistent");
+
+    table.insert_record(1, make_record(1, "exists")).expect("Failed to insert");
+
+    let result = table.delete_record(999);
+    assert!(result.is_err(), "Should fail for nonexistent record");
+
+    // Original record should still be there
+    let content = table.read_record(1).expect("Original should survive");
+    assert_eq!(content.get_content()[0], ContentTypes::Int64(1));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn delete_one_of_multiple_records() {
+    let (mut table, dir) = create_test_table("delete_one_of_many");
+
+    for i in 1..=3 {
+        table.insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("Failed to insert");
+    }
+
+    table.delete_record(2).expect("Failed to delete record 2");
+
+    // Records 1 and 3 should still exist
+    assert!(table.read_record(1).is_ok());
+    assert!(table.read_record(3).is_ok());
+    // Record 2 should be gone
+    assert!(table.read_record(2).is_err());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn delete_record_from_second_page() {
+    let (mut table, dir) = create_test_table("delete_from_second_page");
+
+    let big_name = "d".repeat(2000);
+    for i in 1..=10 {
+        table.insert_record(i, make_record(i as i64, &big_name))
+            .expect(&format!("Failed to insert record {}", i));
+    }
+
+    assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
+
+    table.delete_record(10).expect("Failed to delete record 10");
+
+    assert!(table.read_record(10).is_err(), "Record 10 should be deleted");
+    // Earlier records should still exist
+    assert!(table.read_record(1).is_ok());
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Table::update_record integration tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn update_record_in_place() {
+    let (mut table, dir) = create_test_table("update_in_place");
+
+    table.insert_record(1, make_record(1, "original")).expect("Failed to insert");
+
+    // Update with same-size or smaller content (in-place update)
+    table.update_record(1, make_record(1, "updated")).expect("Failed to update");
+
+    let content = table.read_record(1).expect("Failed to read after update");
+    let values = content.get_content();
+    assert_eq!(values[0], ContentTypes::Int64(1));
+    assert_eq!(values[1], ContentTypes::Text("updated".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn update_nonexistent_record() {
+    let (mut table, dir) = create_test_table("update_nonexistent");
+
+    table.insert_record(1, make_record(1, "exists")).expect("Failed to insert");
+
+    let result = table.update_record(999, make_record(999, "ghost"));
+    assert!(result.is_err(), "Should fail for nonexistent record");
+
+    // Original record should be untouched
+    let content = table.read_record(1).expect("Original should survive");
+    assert_eq!(content.get_content()[1], ContentTypes::Text("exists".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn update_record_larger_content() {
+    let (mut table, dir) = create_test_table("update_larger");
+
+    table.insert_record(1, make_record(1, "short")).expect("Failed to insert");
+
+    // Update with larger content (relocate within page)
+    let bigger = "a".repeat(500);
+    table.update_record(1, make_record(1, &bigger)).expect("Failed to update");
+
+    let content = table.read_record(1).expect("Failed to read after update");
+    let values = content.get_content();
+    assert_eq!(values[0], ContentTypes::Int64(1));
+    assert_eq!(values[1], ContentTypes::Text(bigger));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn update_preserves_other_records() {
+    let (mut table, dir) = create_test_table("update_preserves_others");
+
+    for i in 1..=3 {
+        table.insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("Failed to insert");
+    }
+
+    table.update_record(2, make_record(200, "changed")).expect("Failed to update");
+
+    // Records 1 and 3 should be untouched
+    assert_eq!(
+        table.read_record(1).unwrap().get_content()[1],
+        ContentTypes::Text("item_1".to_string())
+    );
+    assert_eq!(
+        table.read_record(3).unwrap().get_content()[1],
+        ContentTypes::Text("item_3".to_string())
+    );
+
+    // Record 2 should have new content
+    let updated = table.read_record(2).expect("Failed to read updated record");
+    assert_eq!(updated.get_content()[0], ContentTypes::Int64(200));
+    assert_eq!(updated.get_content()[1], ContentTypes::Text("changed".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn update_record_cross_page() {
+    let (mut table, dir) = create_test_table("update_cross_page");
+
+    // Fill first page with large records
+    let big_name = "u".repeat(2000);
+    for i in 1..=4 {
+        table.insert_record(i, make_record(i as i64, &big_name))
+            .expect(&format!("Failed to insert record {}", i));
+    }
+
+    // Update record 1 with even bigger content that won't fit in original page
+    let huge_name = "U".repeat(4000);
+    table.update_record(1, make_record(1, &huge_name)).expect("Failed to cross-page update");
+
+    // Record should still be readable with new content
+    let content = table.read_record(1).expect("Failed to read after cross-page update");
+    assert_eq!(content.get_content()[0], ContentTypes::Int64(1));
+    assert_eq!(content.get_content()[1], ContentTypes::Text(huge_name));
+
+    // Other records should still be readable
+    for i in 2..=4 {
+        let c = table.read_record(i).expect(&format!("Record {} should survive", i));
+        assert_eq!(c.get_content()[0], ContentTypes::Int64(i as i64));
+    }
 
     cleanup_dir(&dir);
 }

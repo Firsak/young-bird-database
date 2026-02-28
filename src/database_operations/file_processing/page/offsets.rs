@@ -25,7 +25,7 @@
 //! ```
 
 use super::record::PageRecordMetadata;
-use crate::database_operations::file_processing::{HEADER_SIZE, PAGE_RECORD_METADATE_SIZE};
+use crate::database_operations::file_processing::{HEADER_SIZE, PAGE_RECORD_METADATA_SIZE};
 
 /// Calculates the absolute byte offset from file start where a page begins.
 ///
@@ -62,7 +62,7 @@ pub fn page_record_metadata_offset(
 ) -> u64 {
     page_start_offset(page_number, page_size_bytes)
         + (HEADER_SIZE as u64)
-        + (record_index as u64) * (PAGE_RECORD_METADATE_SIZE as u64)
+        + (record_index as u64) * (PAGE_RECORD_METADATA_SIZE as u64)
 }
 
 /// Calculates the page-relative offset where record content should be placed.
@@ -83,7 +83,7 @@ pub fn page_record_content_offset_relative_page_end(
 ) -> u64 {
     match last_record {
         None => (page_size_bytes - content_length) as u64,
-        Some(record) => (record.get_bytes_offset() as u64) - (content_length as u64),
+        Some(record) => (record.get_content_offset() as u64) - (content_length as u64),
     }
 }
 

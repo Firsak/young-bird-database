@@ -6,8 +6,9 @@ use super::header::PageHeader;
 use super::offsets;
 use super::page::Page;
 use super::record::{PageRecordContent, PageRecordMetadata};
+use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
-use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATE_SIZE};
+use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
 /// Overwrites the header of an existing page. The page must already exist in the file.
 pub fn write_page_header(
@@ -112,7 +113,7 @@ pub fn add_new_record(
     let record_content_bytes = record_content.to_bytes();
     let record_content_length = record_content_bytes.len();
 
-    if record_content_length + PAGE_RECORD_METADATE_SIZE > page_header.get_free_space() as usize {
+    if record_content_length + PAGE_RECORD_METADATA_SIZE > page_header.get_free_space() as usize {
         return Err("Not enough bytes to write in this page".into());
     };
 
@@ -128,7 +129,7 @@ pub fn add_new_record(
         Some(PageRecordMetadata::read_from_file(
             &mut file,
             last_metadata_pos,
-            PAGE_RECORD_METADATE_SIZE,
+            PAGE_RECORD_METADATA_SIZE,
             filename,
         )?)
     };
@@ -154,7 +155,7 @@ pub fn add_new_record(
 
     page_header.update_records_count(page_header.get_records_count() + 1);
     page_header.update_free_space(
-        page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATE_SIZE) as u32,
+        page_header.get_free_space() - (record_content_length + PAGE_RECORD_METADATA_SIZE) as u32,
     );
 
     page_header.write_to_file(
@@ -176,27 +177,27 @@ fn find_record_metadata_by_id(
     record_id: u64,
     page_header: &PageHeader,
 ) -> Result<(Option<PageRecordMetadata>, Option<u16>), Box<dyn Error>> {
-    let mut found_record_metadata_index: Option<u16> = None;
+    let mut found_slot_index: Option<u16> = None;
     let mut found_record_metadata: Option<PageRecordMetadata> = None;
 
     for index in 0..page_header.get_records_count() {
         let record_metadata_pos = page_number * page_size as u64
             + HEADER_SIZE as u64
-            + (index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+            + (index as u64 * PAGE_RECORD_METADATA_SIZE as u64);
         let record_metadata = PageRecordMetadata::read_from_file(
             file_ref,
             record_metadata_pos,
-            PAGE_RECORD_METADATE_SIZE,
+            PAGE_RECORD_METADATA_SIZE,
             filename,
         )?;
         if record_metadata.get_id() == record_id && !record_metadata.get_is_deleted() {
             found_record_metadata = Some(record_metadata);
-            found_record_metadata_index = Some(index);
+            found_slot_index = Some(index);
             break;
         }
     }
 
-    Ok((found_record_metadata, found_record_metadata_index))
+    Ok((found_record_metadata, found_slot_index))
 }
 
 /// Deletes a record by ID. Last record is hard-deleted (slot reclaimed, free_space increases).
@@ -206,7 +207,7 @@ pub fn delete_record(
     page_number: u64,
     page_kbytes: u32,
     record_id: u64,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -217,7 +218,7 @@ pub fn delete_record(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -237,43 +238,38 @@ pub fn delete_record(
     )?;
 
     let found_record_metadata = res.0;
-    let found_record_metadata_index = res.1;
+    let found_slot_index = res.1;
 
-    if found_record_metadata.is_none() || found_record_metadata_index.is_none() {
-        return Err(Box::from(
-            format!(
-                "No PageRecordMetadata found with provided record_id {}",
-                record_id
-            )
-            .to_string(),
-        ));
+    if found_record_metadata.is_none() || found_slot_index.is_none() {
+        return Err(DatabaseError::RecordNotFound(record_id));
     }
 
-    let found_record_metadata_index = found_record_metadata_index.unwrap();
+    let found_slot_index = found_slot_index.unwrap();
     let mut found_record_metadata = found_record_metadata.unwrap();
 
-    if found_record_metadata_index == (page_header.get_records_count() - 1) {
+    if found_slot_index == (page_header.get_records_count() - 1) {
         page_header.update_records_count(page_header.get_records_count() - 1);
         page_header.update_free_space(
             page_header.get_free_space()
-                + found_record_metadata.get_bytes_content() as u32
-                + PAGE_RECORD_METADATE_SIZE as u32,
+                + found_record_metadata.get_content_size() as u32
+                + PAGE_RECORD_METADATA_SIZE as u32,
         );
-        page_header.write_to_file(&mut file, page_header_pos, filename)
+        page_header.write_to_file(&mut file, page_header_pos, filename)?;
     } else {
         page_header.update_deleted_records_count(page_header.get_deleted_records_count() + 1);
         page_header.update_fragmented_space(
-            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u32,
+            page_header.get_fragment_space() + found_record_metadata.get_content_size() as u32,
         );
 
         found_record_metadata.set_is_deleted(true);
         let record_metadata_pos = page_number * page_size as u64
             + HEADER_SIZE as u64
-            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+            + (found_slot_index as u64 * PAGE_RECORD_METADATA_SIZE as u64);
         found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)?;
 
-        page_header.write_to_file(&mut file, page_header_pos, filename)
+        page_header.write_to_file(&mut file, page_header_pos, filename)?;
     }
+    Ok(())
 }
 
 /// Updates a record's content by ID. If the new content fits in the old slot, it's written
@@ -285,7 +281,7 @@ pub fn update_record(
     page_kbytes: u32,
     record_id: u64,
     record_content: PageRecordContent,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -296,7 +292,7 @@ pub fn update_record(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -316,34 +312,28 @@ pub fn update_record(
     )?;
 
     let found_record_metadata = res.0;
-    let found_record_metadata_index = res.1;
+    let found_slot_index = res.1;
 
-    if found_record_metadata.is_none() || found_record_metadata_index.is_none() {
-        return Err(Box::from(
-            format!(
-                "No PageRecordMetadata found with provided record_id {}",
-                record_id
-            )
-            .to_string(),
-        ));
+    if found_record_metadata.is_none() || found_slot_index.is_none() {
+        return Err(DatabaseError::RecordNotFound(record_id));
     }
 
-    let found_record_metadata_index = found_record_metadata_index.unwrap();
+    let found_slot_index = found_slot_index.unwrap();
     let mut found_record_metadata = found_record_metadata.unwrap();
 
-    let old_record_content_length = found_record_metadata.get_bytes_content();
+    let old_record_content_length = found_record_metadata.get_content_size();
     let new_record_content_length = record_content.to_bytes().len();
     let page_pos = page_number * (page_size as u64);
 
     if old_record_content_length as usize >= new_record_content_length {
         record_content.write_to_file(
             &mut file,
-            page_pos + found_record_metadata.get_bytes_offset() as u64,
+            page_pos + found_record_metadata.get_content_offset() as u64,
             filename,
         )?;
         let record_content_length_difference =
-            found_record_metadata.get_bytes_content() as usize - new_record_content_length;
-        if found_record_metadata_index == (page_header.get_records_count() - 1) {
+            found_record_metadata.get_content_size() as usize - new_record_content_length;
+        if found_slot_index == (page_header.get_records_count() - 1) {
             page_header.update_free_space(
                 page_header.get_free_space() + record_content_length_difference as u32,
             );
@@ -355,24 +345,19 @@ pub fn update_record(
 
         let record_metadata_pos = page_number * page_size as u64
             + HEADER_SIZE as u64
-            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+            + (found_slot_index as u64 * PAGE_RECORD_METADATA_SIZE as u64);
         found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)?;
 
-        page_header.write_to_file(&mut file, page_header_pos, filename)
+        page_header.write_to_file(&mut file, page_header_pos, filename)?;
+        Ok(())
     } else {
         if new_record_content_length > page_header.get_free_space() as usize {
-            // Need to create logic to delete record here and create on another page
-            return Err(Box::from(
-                format!(
-                    "Not enough space in page {} to update record {}",
-                    page_number, record_id
-                )
-                .to_string(),
-            ));
+            // Phase 5: delete here + insert on another page (needs index)
+            return Err(DatabaseError::PageFull);
         }
 
         page_header.update_fragmented_space(
-            page_header.get_fragment_space() + found_record_metadata.get_bytes_content() as u32,
+            page_header.get_fragment_space() + found_record_metadata.get_content_size() as u32,
         );
         page_header
             .update_free_space(page_header.get_free_space() - new_record_content_length as u32);
@@ -380,26 +365,27 @@ pub fn update_record(
 
         let last_record_metadata_pos = page_pos
             + (HEADER_SIZE as u64)
-            + ((page_header.get_records_count() - 1) as u64) * (PAGE_RECORD_METADATE_SIZE as u64);
+            + ((page_header.get_records_count() - 1) as u64) * (PAGE_RECORD_METADATA_SIZE as u64);
         let last_record_metadata = PageRecordMetadata::read_from_file(
             &mut file,
             last_record_metadata_pos,
-            PAGE_RECORD_METADATE_SIZE,
+            PAGE_RECORD_METADATA_SIZE,
             filename,
         )?;
         let new_record_content_pos =
-            (last_record_metadata.get_bytes_offset() as u64) - (new_record_content_length as u64);
+            (last_record_metadata.get_content_offset() as u64) - (new_record_content_length as u64);
 
-        found_record_metadata.set_bytes_content(new_record_content_length as u32);
-        found_record_metadata.set_bytes_offset(new_record_content_pos as u32);
+        found_record_metadata.set_content_size(new_record_content_length as u32);
+        found_record_metadata.set_content_offset(new_record_content_pos as u32);
 
         record_content.write_to_file(&mut file, page_pos + new_record_content_pos, filename)?;
 
         let record_metadata_pos = page_number * page_size as u64
             + HEADER_SIZE as u64
-            + (found_record_metadata_index as u64 * PAGE_RECORD_METADATE_SIZE as u64);
+            + (found_slot_index as u64 * PAGE_RECORD_METADATA_SIZE as u64);
 
-        found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)
+        found_record_metadata.write_to_file(&mut file, record_metadata_pos, filename)?;
+        Ok(())
     }
 }
 
@@ -437,14 +423,14 @@ pub fn write_page(
     for index in 0..page.get_records_metadata().len() {
         let record_metadata = &page.get_records_metadata()[index];
         let metadata_bytes = record_metadata.to_bytes();
-        let metadata_pos = HEADER_SIZE + index * PAGE_RECORD_METADATE_SIZE;
-        buffer[metadata_pos..metadata_pos + PAGE_RECORD_METADATE_SIZE]
+        let metadata_pos = HEADER_SIZE + index * PAGE_RECORD_METADATA_SIZE;
+        buffer[metadata_pos..metadata_pos + PAGE_RECORD_METADATA_SIZE]
             .copy_from_slice(&metadata_bytes);
 
-        let record_content = page.get_record_content_by_metadata_index(index);
+        let record_content = page.get_record_content_by_slot_index(index);
         let content_bytes = record_content.to_bytes();
-        let content_len = record_metadata.get_bytes_content();
-        let content_pos = record_metadata.get_bytes_offset();
+        let content_len = record_metadata.get_content_size();
+        let content_pos = record_metadata.get_content_offset();
         buffer[content_pos as usize..content_pos as usize + content_len as usize]
             .copy_from_slice(&content_bytes);
     }
@@ -482,7 +468,7 @@ pub fn compact_page(
     let page_size: usize = page_kbytes as usize * KBYTES;
 
     let new_header = PageHeader::new(
-        old_page.header.page_id,
+        old_page.header.page_number,
         0,
         0,
         (page_size - HEADER_SIZE) as u32,
@@ -493,7 +479,7 @@ pub fn compact_page(
 
     for index in 0..old_page.get_records_metadata().len() {
         let old_metadata = &old_page.get_records_metadata()[index];
-        let content = old_page.get_record_content_by_metadata_index(index);
+        let content = old_page.get_record_content_by_slot_index(index);
 
         let last_record = {
             if new_page.get_records_metadata().is_empty() {
@@ -505,12 +491,12 @@ pub fn compact_page(
         let new_content_offset = offsets::page_record_content_offset_relative_page_end(
             page_size,
             last_record,
-            old_metadata.get_bytes_content() as usize,
+            old_metadata.get_content_size() as usize,
         );
         let new_metadata = PageRecordMetadata::new(
             old_metadata.get_id(),
             new_content_offset as u32,
-            old_metadata.get_bytes_content(),
+            old_metadata.get_content_size(),
             false,
         );
 
@@ -521,8 +507,8 @@ pub fn compact_page(
             .update_records_count(new_page.header.get_records_count() + 1);
         new_page.header.update_free_space(
             new_page.header.get_free_space()
-                - PAGE_RECORD_METADATE_SIZE as u32
-                - new_metadata.get_bytes_content(),
+                - PAGE_RECORD_METADATA_SIZE as u32
+                - new_metadata.get_content_size(),
         );
         new_page.append_record(new_metadata, new_content);
     }

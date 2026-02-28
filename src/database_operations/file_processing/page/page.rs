@@ -34,13 +34,13 @@ impl Page {
         &self.records_content
     }
 
-    /// Returns the content paired with the metadata at the given index.
+    /// Returns the content paired with the metadata at the given slot index.
     /// Content is stored in reverse order internally (insert(0, ...)),
     /// so records[i] pairs with records_content[len - 1 - i].
-    pub fn get_record_content_by_metadata_index(
+    pub fn get_record_content_by_slot_index(
         &self,
-        metadata_index: usize,
+        slot_index: usize,
     ) -> &PageRecordContent {
-        &self.records_content[&self.records_content.len() - 1 - metadata_index]
+        &self.records_content[&self.records_content.len() - 1 - slot_index]
     }
 }
