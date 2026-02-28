@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -6,6 +5,7 @@ use super::header::PageHeader;
 use super::offsets;
 use super::page::Page;
 use super::record::{PageRecordContent, PageRecordMetadata};
+use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
@@ -14,12 +14,12 @@ pub fn read_page_header(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
-) -> Result<PageHeader, Box<dyn Error>> {
+) -> Result<PageHeader, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -33,12 +33,12 @@ pub fn read_page(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
-) -> Result<Page, Box<dyn Error>> {
+) -> Result<Page, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -48,7 +48,7 @@ pub fn read_page(
         Ok(pos) => pos,
         Err(error) => {
             println!("Error seeking in the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -58,7 +58,7 @@ pub fn read_page(
         Ok(_) => {}
         Err(error) => {
             println!("Error reading page {page_number} in {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -101,12 +101,12 @@ pub fn read_record_metadata(
     page_number: u64,
     slot_index: u16,
     page_kbytes: u32,
-) -> Result<PageRecordMetadata, Box<dyn Error>> {
+) -> Result<PageRecordMetadata, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -129,12 +129,12 @@ pub fn read_record_content(
     page_number: u64,
     page_kbytes: u32,
     record_metadata: &PageRecordMetadata,
-) -> Result<PageRecordContent, Box<dyn Error>> {
+) -> Result<PageRecordContent, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 

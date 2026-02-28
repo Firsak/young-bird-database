@@ -1,6 +1,6 @@
-use std::error::Error;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::HEADER_SIZE;
 
@@ -108,7 +108,7 @@ impl BinarySerde for PageHeader {
 }
 
 impl ReadWrite for PageHeader {
-    type RWError = Box<dyn Error>;
+    type RWError = DatabaseError;
 
     fn write_to_file(
         &self,
@@ -120,7 +120,7 @@ impl ReadWrite for PageHeader {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -128,7 +128,7 @@ impl ReadWrite for PageHeader {
             Ok(_) => Ok(()),
             Err(error) => {
                 println!("Error writing page header to the file {filename}: {error}");
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }
@@ -146,7 +146,7 @@ impl ReadWrite for PageHeader {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -155,7 +155,7 @@ impl ReadWrite for PageHeader {
             Ok(_) => Ok(PageHeader::from_bytes(&(buffer[0..HEADER_SIZE]))?),
             Err(error) => {
                 println!("Error reading page header at pos {absolute_file_start_offset} (look for you page size) in {filename}: {error}");
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }

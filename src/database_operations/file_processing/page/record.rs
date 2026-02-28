@@ -1,6 +1,6 @@
-use std::error::Error;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::types::ContentTypes;
 use crate::database_operations::file_processing::PAGE_RECORD_METADATA_SIZE;
@@ -91,7 +91,7 @@ impl BinarySerde for PageRecordMetadata {
 }
 
 impl ReadWrite for PageRecordMetadata {
-    type RWError = Box<dyn Error>;
+    type RWError = DatabaseError;
 
     fn write_to_file(
         &self,
@@ -103,7 +103,7 @@ impl ReadWrite for PageRecordMetadata {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -111,7 +111,7 @@ impl ReadWrite for PageRecordMetadata {
             Ok(_) => Ok(()),
             Err(error) => {
                 println!("Error writing page record to the file {filename}: {error}");
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }
@@ -129,7 +129,7 @@ impl ReadWrite for PageRecordMetadata {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -140,7 +140,7 @@ impl ReadWrite for PageRecordMetadata {
                 println!(
                     "Error reading page record at pos {absolute_file_start_offset} in {filename}: {error}"
                 );
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }
@@ -218,7 +218,7 @@ impl BinarySerde for PageRecordContent {
 }
 
 impl ReadWrite for PageRecordContent {
-    type RWError = Box<dyn Error>;
+    type RWError = DatabaseError;
 
     fn write_to_file(
         &self,
@@ -230,7 +230,7 @@ impl ReadWrite for PageRecordContent {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -238,7 +238,7 @@ impl ReadWrite for PageRecordContent {
             Ok(_) => Ok(()),
             Err(error) => {
                 println!("Error writing page record content to the file {filename}: {error}");
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }
@@ -256,7 +256,7 @@ impl ReadWrite for PageRecordContent {
             Ok(pos) => pos,
             Err(error) => {
                 println!("Error seeking in the file {filename}: {error}");
-                return Err(Box::new(error));
+                return Err(DatabaseError::Io(error));
             }
         };
 
@@ -267,7 +267,7 @@ impl ReadWrite for PageRecordContent {
                 println!(
                     "Error reading page record at pos {absolute_file_start_offset} in {filename}: {error}"
                 );
-                Err(Box::new(error))
+                Err(DatabaseError::Io(error))
             }
         }
     }

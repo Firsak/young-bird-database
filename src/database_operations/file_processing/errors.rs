@@ -52,12 +52,3 @@ impl From<String> for DatabaseError {
         DatabaseError::Serialization(msg)
     }
 }
-
-impl From<Box<dyn std::error::Error>> for DatabaseError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        match err.downcast::<std::io::Error>() {
-            Ok(io_err) => DatabaseError::Io(*io_err),
-            Err(other) => DatabaseError::Serialization(other.to_string()),
-        }
-    }
-}

@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 
@@ -16,7 +15,7 @@ pub fn write_page_header(
     page_number: u64,
     page_header: PageHeader,
     page_kbytes: u32,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -26,7 +25,7 @@ pub fn write_page_header(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -41,7 +40,7 @@ pub fn write_new_page(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -51,7 +50,7 @@ pub fn write_new_page(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -65,7 +64,7 @@ pub fn write_new_page(
         Ok(pos) => pos,
         Err(error) => {
             println!("Error expanding the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -73,7 +72,7 @@ pub fn write_new_page(
         Ok(_) => Ok(()),
         Err(error) => {
             println!("Error writing ending byte to the file {filename}: {error}");
-            Err(Box::new(error))
+            Err(DatabaseError::Io(error))
         }
     }
 }
@@ -86,7 +85,7 @@ pub fn add_new_record(
     page_kbytes: u32,
     record_id: u64,
     record_content: PageRecordContent,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -97,7 +96,7 @@ pub fn add_new_record(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -114,7 +113,7 @@ pub fn add_new_record(
     let record_content_length = record_content_bytes.len();
 
     if record_content_length + PAGE_RECORD_METADATA_SIZE > page_header.get_free_space() as usize {
-        return Err("Not enough bytes to write in this page".into());
+        return Err(DatabaseError::PageFull);
     };
 
     let next_record_index = page_header.get_records_count();
@@ -176,7 +175,7 @@ fn find_record_metadata_by_id(
     page_size: usize,
     record_id: u64,
     page_header: &PageHeader,
-) -> Result<(Option<PageRecordMetadata>, Option<u16>), Box<dyn Error>> {
+) -> Result<(Option<PageRecordMetadata>, Option<u16>), DatabaseError> {
     let mut found_slot_index: Option<u16> = None;
     let mut found_record_metadata: Option<PageRecordMetadata> = None;
 
@@ -397,7 +396,7 @@ pub fn write_page(
     page_number: u64,
     page_kbytes: u32,
     page: &Page,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .write(true)
         .create(true)
@@ -407,7 +406,7 @@ pub fn write_page(
         Ok(file) => file,
         Err(error) => {
             println!("Error opening or creating the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -439,7 +438,7 @@ pub fn write_page(
         Ok(pos) => pos,
         Err(error) => {
             println!("Error seeking in the file {filename}: {error}");
-            return Err(Box::new(error));
+            return Err(DatabaseError::Io(error));
         }
     };
 
@@ -447,7 +446,7 @@ pub fn write_page(
         Ok(_) => Ok(()),
         Err(error) => {
             println!("Error writing page to the file {filename}: {error}");
-            Err(Box::new(error))
+            Err(DatabaseError::Io(error))
         }
     }
 }
@@ -458,7 +457,7 @@ pub fn compact_page(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), DatabaseError> {
     let old_page = super::reading::read_page(filename, page_number, page_kbytes)?;
 
     if old_page.header.get_fragment_space() == 0 {
