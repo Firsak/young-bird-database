@@ -61,6 +61,16 @@ impl Table {
         base_path: String,
         pages_per_file: u32,
     ) -> Result<Self, DatabaseError> {
+        if name.trim().is_empty() {
+            return Err(DatabaseError::InvalidArgument(
+                "Table name must not be empty".to_string(),
+            ));
+        }
+        if pages_per_file < 1 {
+            return Err(DatabaseError::InvalidArgument(
+                "Pages per file should be more than 0".to_string(),
+            ));
+        }
         let meta_path = format!("{}/{}.meta", base_path, name);
         let header = read_table_header(&meta_path)?;
         Ok(Self {
@@ -80,10 +90,32 @@ impl Table {
         page_kbytes: u32,
         columns: Vec<super::column_def::ColumnDef>,
     ) -> Result<Self, DatabaseError> {
+        if name.trim().is_empty() {
+            return Err(DatabaseError::InvalidArgument(
+                "Table name must not be empty".to_string(),
+            ));
+        }
         if pages_per_file < 1 {
             return Err(DatabaseError::InvalidArgument(
                 "Pages per file should be more than 0".to_string(),
             ));
+        }
+        if page_kbytes < 1 {
+            return Err(DatabaseError::InvalidArgument(
+                "Page size should be at least 1 KB".to_string(),
+            ));
+        }
+        if columns.is_empty() {
+            return Err(DatabaseError::InvalidArgument(
+                "Table must have at least one column".to_string(),
+            ));
+        }
+        for col in &columns {
+            if col.get_name().trim().is_empty() {
+                return Err(DatabaseError::InvalidArgument(
+                    "Column name must not be empty".to_string(),
+                ));
+            }
         }
         let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, columns);
         let table = Table::new(name, base_path, pages_per_file, table_header);

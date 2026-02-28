@@ -698,3 +698,97 @@ fn update_with_wrong_schema_rejected() {
 
     cleanup_dir(&dir);
 }
+
+// ══════════════════════════════════════════════════════════
+// Input validation tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn create_with_zero_page_kbytes_rejected() {
+    let dir = temp_dir("zero_page_kbytes");
+    let result = Table::create(
+        "test".to_string(),
+        dir.clone(),
+        10,
+        0, // zero page_kbytes
+        vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+    );
+    assert!(result.is_err(), "Should reject page_kbytes of 0");
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn create_with_empty_columns_rejected() {
+    let dir = temp_dir("empty_columns");
+    let result = Table::create(
+        "test".to_string(),
+        dir.clone(),
+        10,
+        8,
+        vec![], // no columns
+    );
+    assert!(result.is_err(), "Should reject empty column list");
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn create_with_empty_table_name_rejected() {
+    let dir = temp_dir("empty_table_name");
+    let result = Table::create(
+        "".to_string(),
+        dir.clone(),
+        10,
+        8,
+        vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+    );
+    assert!(result.is_err(), "Should reject empty table name");
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn create_with_whitespace_table_name_rejected() {
+    let dir = temp_dir("whitespace_table_name");
+    let result = Table::create(
+        "   ".to_string(),
+        dir.clone(),
+        10,
+        8,
+        vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+    );
+    assert!(result.is_err(), "Should reject whitespace-only table name");
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn create_with_empty_column_name_rejected() {
+    let dir = temp_dir("empty_col_name");
+    let result = Table::create(
+        "test".to_string(),
+        dir.clone(),
+        10,
+        8,
+        vec![ColumnDef::new(ColumnTypes::Int64, false, "".to_string())],
+    );
+    assert!(result.is_err(), "Should reject empty column name");
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn open_with_zero_pages_per_file_rejected() {
+    let result = Table::open(
+        "test".to_string(),
+        "/tmp".to_string(),
+        0, // zero pages_per_file
+    );
+    assert!(result.is_err(), "Should reject pages_per_file of 0");
+}
+
+#[test]
+fn open_with_empty_name_rejected() {
+    let result = Table::open(
+        "".to_string(),
+        "/tmp".to_string(),
+        10,
+    );
+    assert!(result.is_err(), "Should reject empty table name on open");
+}
