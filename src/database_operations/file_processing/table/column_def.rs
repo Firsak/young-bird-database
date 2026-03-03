@@ -1,6 +1,8 @@
 use crate::database_operations::file_processing::traits::BinarySerde;
 use crate::database_operations::file_processing::types::ColumnTypes;
 
+/// Column definition: type, nullability, and name.
+/// Serialized as [data_type: 1][nullable: 1][name_len: u32 LE][name: UTF-8].
 #[derive(Debug)]
 pub struct ColumnDef {
     data_type: ColumnTypes, // 1 byte

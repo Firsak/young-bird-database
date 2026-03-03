@@ -6,6 +6,10 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::BinarySerde;
 
 /// Writes a TableHeader to a .meta file. Creates or overwrites the file.
+///
+/// # Arguments
+/// * `filename` - Path to the .meta file (created if it doesn't exist)
+/// * `table_header` - The header to serialize and write
 pub fn write_table_header(filename: &str, table_header: &TableHeader) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .write(true)

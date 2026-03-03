@@ -1,6 +1,8 @@
 use std::fmt;
 use super::traits::BinarySerde;
 
+/// A typed column value. Tag byte 0–12 determines the variant.
+/// Serialized as [type_tag: 1 byte][value: variable].
 #[derive(Debug, PartialEq, Clone)]
 pub enum ContentTypes {
     Null,          //  0
@@ -18,6 +20,8 @@ pub enum ContentTypes {
     Float64(f64),  // 12
 }
 
+/// Schema-level column type. Single tag byte (0–11).
+/// Used in ColumnDef to define what values a column accepts.
 #[derive(Debug, PartialEq)]
 pub enum ColumnTypes {
     Boolean, //  0

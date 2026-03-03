@@ -10,6 +10,11 @@ use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite
 use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
 /// Reads only the page header at the given page number.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes (e.g., 8 for 8 KB pages)
 pub fn read_page_header(
     filename: &str,
     page_number: u64,
@@ -29,6 +34,15 @@ pub fn read_page_header(
 }
 
 /// Reads a full page: header, all record metadata, and all record content.
+/// Soft-deleted records are skipped — the returned Page contains only active records.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+///
+/// # Returns
+/// A `Page` struct with the header, active metadata slots, and their content.
 pub fn read_page(
     filename: &str,
     page_number: u64,
@@ -96,6 +110,12 @@ pub fn read_page(
 }
 
 /// Reads a single record's metadata by its slot index within the page.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `slot_index` - Zero-indexed metadata slot position within the page
+/// * `page_kbytes` - Page size in kilobytes
 pub fn read_record_metadata(
     filename: &str,
     page_number: u64,
@@ -124,6 +144,12 @@ pub fn read_record_metadata(
 }
 
 /// Reads a record's content using its metadata (which provides offset and size).
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+/// * `record_metadata` - Previously read metadata that supplies content_offset and content_size
 pub fn read_record_content(
     filename: &str,
     page_number: u64,

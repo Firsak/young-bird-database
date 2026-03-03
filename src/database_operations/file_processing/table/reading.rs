@@ -6,6 +6,9 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::BinarySerde;
 
 /// Reads a TableHeader from a .meta file.
+///
+/// # Arguments
+/// * `filename` - Path to the .meta file
 pub fn read_table_header(filename: &str) -> Result<TableHeader, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,

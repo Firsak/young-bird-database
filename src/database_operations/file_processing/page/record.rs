@@ -5,6 +5,8 @@ use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite
 use crate::database_operations::file_processing::types::ContentTypes;
 use crate::database_operations::file_processing::PAGE_RECORD_METADATA_SIZE;
 
+/// Fixed 20-byte record slot in the metadata region of a page.
+/// Points to the record's content via page-relative offset and size.
 #[derive(Debug)]
 pub struct PageRecordMetadata {
     // 20 bytes: [id: 8][content_offset: 4][content_size: 4][is_deleted: 1][padding: 3]
@@ -146,6 +148,8 @@ impl ReadWrite for PageRecordMetadata {
     }
 }
 
+/// Variable-size record payload: a list of typed column values.
+/// Serialized as [column_count: u32][col_1_len: u32][col_1_data]...[col_N_len: u32][col_N_data].
 #[derive(Debug)]
 pub struct PageRecordContent {
     content: Vec<ContentTypes>,

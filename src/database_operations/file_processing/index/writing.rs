@@ -7,6 +7,10 @@ use crate::database_operations::file_processing::traits::BinarySerde;
 use crate::database_operations::file_processing::{INDEX_HEADER_SIZE, INDEX_ENTRY_SIZE};
 
 /// Writes a HashIndex to an .idx file. Creates or overwrites the file.
+///
+/// # Arguments
+/// * `filename` - Path to the .idx file (created if it doesn't exist)
+/// * `index` - The in-memory HashIndex to serialize and write
 pub fn write_index(filename: &str, index: &HashIndex) -> Result<(), DatabaseError> {
     let mut file = match OpenOptions::new()
         .write(true)

@@ -4,6 +4,8 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite};
 use crate::database_operations::file_processing::HEADER_SIZE;
 
+/// Fixed 20-byte header at the start of each page.
+/// Tracks record count, deletion state, and space availability.
 #[derive(Debug)]
 pub struct PageHeader {
     // 20 bytes

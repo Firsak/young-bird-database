@@ -13,6 +13,9 @@ pub struct HashIndex {
 impl HashIndex {
     /// Creates a new empty hash index with the given number of buckets.
     /// All slots are initialized to Empty.
+    ///
+    /// # Arguments
+    /// * `initial_bucket_count` - Number of hash buckets to allocate (e.g., 16)
     pub fn new(initial_bucket_count: u64) -> Self {
         let mut buckets = Vec::with_capacity(initial_bucket_count as usize);
         for _ in 0..initial_bucket_count {
@@ -25,7 +28,11 @@ impl HashIndex {
     }
 
     /// Constructs a HashIndex from an existing header and buckets.
-    /// Used by read_index to reconstruct from file data.
+    /// Used by `read_index` to reconstruct from file data.
+    ///
+    /// # Arguments
+    /// * `header` - Deserialized index header (bucket_count, entry_count, seed)
+    /// * `buckets` - Deserialized bucket entries (must match header.bucket_count in length)
     pub fn from_parts(header: IndexHeader, buckets: Vec<IndexEntry>) -> Self {
         HashIndex { header, buckets }
     }
@@ -48,6 +55,8 @@ impl HashIndex {
         self.header.get_entry_count() as f64 / self.header.get_bucket_count() as f64
     }
 
+    /// Doubles bucket count and re-inserts all Occupied entries.
+    /// Tombstones are discarded, reducing fragmentation.
     pub fn rehash(&mut self) {
         let saved_buckets = self.buckets.clone();
         let new_buckets_count = self.header.get_bucket_count() * 2;
@@ -74,10 +83,21 @@ impl HashIndex {
         self.header = IndexHeader::new(new_buckets_count, self.header.get_entry_count());
     }
 
+    /// Linear probe: wraps around to bucket 0 after the last bucket.
     fn next_bucket(&self, bucket_index: usize) -> usize {
         (bucket_index + 1) % self.buckets.len()
     }
 
+    /// Inserts a new entry mapping record_id → (page_number, slot_index).
+    /// Triggers rehash if load factor would reach 0.75.
+    ///
+    /// # Arguments
+    /// * `record_id` - Unique record identifier (used as hash key)
+    /// * `page_number` - Global page number where the record lives
+    /// * `slot_index` - Metadata slot position within the page
+    ///
+    /// # Errors
+    /// * `InvalidArgument` - Duplicate record_id already exists in the index
     pub fn insert_entry(
         &mut self,
         record_id: u64,
@@ -111,6 +131,13 @@ impl HashIndex {
         Ok(())
     }
 
+    /// Looks up a record_id. Probes past tombstones, stops at empty.
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID to search for
+    ///
+    /// # Returns
+    /// `Some((page_number, slot_index))` if found, `None` if absent.
     pub fn lookup(&self, record_id: u64) -> Option<(u64, u16)> {
         let mut bucket_position_slot = self.bucket_index(record_id);
         for _ in 0..self.buckets.len() {
@@ -129,6 +156,14 @@ impl HashIndex {
         None
     }
 
+    /// Removes an entry by marking it as Tombstone (preserves probe chains).
+    /// Decrements entry_count.
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID to remove
+    ///
+    /// # Errors
+    /// * `RecordNotFound` - No entry with this record_id in the index
     pub fn remove_entry(&mut self, record_id: u64) -> Result<(), DatabaseError> {
         let mut bucket_position_slot = self.bucket_index(record_id);
         for _ in 0..self.buckets.len() {
@@ -147,6 +182,16 @@ impl HashIndex {
         Err(DatabaseError::RecordNotFound(record_id))
     }
 
+    /// Updates an existing entry's location (page_number, slot_index) in place.
+    /// Used for record migration without remove+insert.
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID whose location to update
+    /// * `new_page_number` - New global page number
+    /// * `new_slot_index` - New metadata slot position within the page
+    ///
+    /// # Errors
+    /// * `RecordNotFound` - No entry with this record_id in the index
     pub fn update_entry(
         &mut self,
         record_id: u64,

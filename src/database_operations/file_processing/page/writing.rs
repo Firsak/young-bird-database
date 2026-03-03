@@ -10,6 +10,12 @@ use crate::database_operations::file_processing::traits::{BinarySerde, ReadWrite
 use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
 
 /// Overwrites the header of an existing page. The page must already exist in the file.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_header` - The header to write (consumed by the call)
+/// * `page_kbytes` - Page size in kilobytes
 pub fn write_page_header(
     filename: &str,
     page_number: u64,
@@ -36,6 +42,11 @@ pub fn write_page_header(
 
 /// Creates a new empty page at the given page number.
 /// Writes an initialized header and expands the file to fit the full page.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file (created if it doesn't exist)
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
 pub fn write_new_page(
     filename: &str,
     page_number: u64,
@@ -78,8 +89,20 @@ pub fn write_new_page(
 }
 
 /// Appends a new record to a page. Writes metadata after existing metadata slots
-/// and content at the end of the page growing backwards. Returns the assigned slot_index
-/// on success, or error if not enough free space.
+/// and content at the end of the page growing backwards.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+/// * `record_id` - Unique identifier for the new record
+/// * `record_content` - The column values to store
+///
+/// # Returns
+/// The assigned slot_index (0-based position in the metadata region).
+///
+/// # Errors
+/// * `PageFull` - Not enough free space for metadata + content
 pub fn add_new_record(
     filename: &str,
     page_number: u64,
@@ -168,7 +191,18 @@ pub fn add_new_record(
 }
 
 /// Scans metadata slots sequentially to find a record by its ID.
-/// Returns (metadata, slot_index) or (None, None) if not found.
+/// Skips soft-deleted records.
+///
+/// # Arguments
+/// * `file_ref` - Open file handle with read permission
+/// * `filename` - File path, used only for error messages
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_size` - Page size in bytes (not kilobytes)
+/// * `record_id` - The record ID to search for
+/// * `page_header` - Header of the page (provides records_count for scan bounds)
+///
+/// # Returns
+/// `(Some(metadata), Some(slot_index))` if found, `(None, None)` if not found.
 fn find_record_metadata_by_id(
     file_ref: &mut std::fs::File,
     filename: &str,
@@ -202,6 +236,15 @@ fn find_record_metadata_by_id(
 
 /// Deletes a record by ID. Last record is hard-deleted (slot reclaimed, free_space increases).
 /// Non-last records are soft-deleted (marked deleted, fragmented_space increases).
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+/// * `record_id` - The record ID to delete
+///
+/// # Errors
+/// * `RecordNotFound` - No active record with this ID exists in the page
 pub fn delete_record(
     filename: &str,
     page_number: u64,
@@ -274,7 +317,17 @@ pub fn delete_record(
 
 /// Updates a record's content by ID. If the new content fits in the old slot, it's written
 /// in place. If larger, the old space becomes fragmented and content is written at a new position.
-/// Returns error if the page doesn't have enough free space for the larger content.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+/// * `record_id` - The record ID to update
+/// * `record_content` - The new column values to store
+///
+/// # Errors
+/// * `RecordNotFound` - No active record with this ID exists in the page
+/// * `PageFull` - New content is larger and the page lacks free space (caller should relocate)
 pub fn update_record(
     filename: &str,
     page_number: u64,
@@ -392,6 +445,12 @@ pub fn update_record(
 /// Writes a full Page struct to file at the given page number using a single I/O call.
 /// Builds a page-sized buffer in memory, then flushes it to disk.
 /// The Page should contain only active (non-deleted) records.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+/// * `page` - The in-memory Page to serialize and write
 pub fn write_page(
     filename: &str,
     page_number: u64,
@@ -454,6 +513,11 @@ pub fn write_page(
 
 /// Compacts a page by rewriting all non-deleted records contiguously,
 /// eliminating fragmented space. No-op if fragmented_space is already 0.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
 pub fn compact_page(
     filename: &str,
     page_number: u64,

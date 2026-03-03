@@ -9,6 +9,9 @@ use crate::database_operations::file_processing::traits::BinarySerde;
 use crate::database_operations::file_processing::{INDEX_ENTRY_SIZE, INDEX_HEADER_SIZE};
 
 /// Reads a HashIndex from an .idx file.
+///
+/// # Arguments
+/// * `filename` - Path to the .idx file
 pub fn read_index(filename: &str) -> Result<HashIndex, DatabaseError> {
     let mut file = match OpenOptions::new().read(true).open(filename) {
         Ok(file) => file,

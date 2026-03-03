@@ -83,7 +83,16 @@ impl Table {
         write_index(&self.idx_path(), &self.index)
     }
 
-    /// Opens an existing table by reading its .meta file.
+    /// Opens an existing table by reading its .meta and .idx files.
+    ///
+    /// # Arguments
+    /// * `name` - Table name (must not be empty)
+    /// * `base_path` - Directory containing the table's files
+    /// * `pages_per_file` - Max pages per .dat file (runtime config, not persisted)
+    ///
+    /// # Errors
+    /// * `InvalidArgument` - Empty name or pages_per_file < 1
+    /// * `Io` - .meta or .idx file doesn't exist or can't be read
     pub fn open(
         name: String,
         base_path: String,
@@ -112,8 +121,17 @@ impl Table {
         })
     }
 
-    /// Creates a new table: writes the .meta file and the first .dat file
-    /// with one empty page.
+    /// Creates a new table: writes .meta, first .dat (one empty page), and .idx files.
+    ///
+    /// # Arguments
+    /// * `name` - Table name (must not be empty)
+    /// * `base_path` - Directory where table files will be created
+    /// * `pages_per_file` - Max pages per .dat file (runtime config, not persisted)
+    /// * `page_kbytes` - Page size in kilobytes (must be >= 1)
+    /// * `columns` - Column definitions for the table schema (must have at least one)
+    ///
+    /// # Errors
+    /// * `InvalidArgument` - Empty name, pages_per_file < 1, page_kbytes < 1, no columns, or empty column name
     pub fn create(
         name: String,
         base_path: String,
@@ -157,10 +175,12 @@ impl Table {
         Ok(table)
     }
 
+    /// Returns a shared reference to the table schema.
     pub fn get_header(&self) -> &TableHeader {
         &self.header
     }
 
+    /// Returns a mutable reference to the table schema (e.g., to update pages_count).
     pub fn get_header_mut(&mut self) -> &mut TableHeader {
         &mut self.header
     }
@@ -168,6 +188,14 @@ impl Table {
     /// Checks that a non-null value's type matches the column definition.
     /// Null values should be handled by the caller (validate_record) before
     /// calling this — reaching Null here is a programming error (InvalidArgument).
+    ///
+    /// # Arguments
+    /// * `column_def` - The schema definition for this column
+    /// * `value` - The actual value to type-check against the definition
+    ///
+    /// # Errors
+    /// * `SchemaViolation` - Value type doesn't match column type
+    /// * `InvalidArgument` - Called with Null (should have been caught by caller)
     fn compare_column_def_and_value_helper(
         column_def: &ColumnDef,
         value: &ContentTypes,
@@ -202,6 +230,12 @@ impl Table {
 
     /// Validates that a record's content matches the table schema.
     /// Checks column count, type compatibility, and nullability.
+    ///
+    /// # Arguments
+    /// * `record_content` - The record to validate against this table's column definitions
+    ///
+    /// # Errors
+    /// * `SchemaViolation` - Wrong column count, type mismatch, or null in non-nullable column
     fn validate_record(&self, record_content: &PageRecordContent) -> Result<(), DatabaseError> {
         let values = record_content.get_content();
         let column_defs = self.header.get_column_defs();
@@ -233,7 +267,16 @@ impl Table {
 
     /// Inserts a record into the table. Tries the last page first;
     /// if it doesn't have enough space, creates a new page.
-    /// Updates the .meta file after changes.
+    /// Updates .meta and .idx files after changes.
+    ///
+    /// # Arguments
+    /// * `record_id` - Unique identifier for the new record
+    /// * `record_content` - The column values to store
+    ///
+    /// # Errors
+    /// * `SchemaViolation` - Record doesn't match table schema
+    /// * `RecordTooLarge` - Record can't fit in any single page
+    /// * `InvalidArgument` - Duplicate record_id in the index
     pub fn insert_record(
         &mut self,
         record_id: u64,
@@ -290,7 +333,15 @@ impl Table {
     }
 
     /// Reads a record by ID via index lookup.
-    /// Returns the record's content, or RecordNotFound if not in the index.
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID to look up
+    ///
+    /// # Returns
+    /// The record's column values.
+    ///
+    /// # Errors
+    /// * `RecordNotFound` - No record with this ID in the index
     pub fn read_record(&self, record_id: u64) -> Result<PageRecordContent, DatabaseError> {
         let lookup = self.index.lookup(record_id);
         if let Some(record_pos) = lookup {
@@ -318,6 +369,12 @@ impl Table {
 
     /// Deletes a record by ID via index lookup.
     /// Removes the record from the page and from the index.
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID to delete
+    ///
+    /// # Errors
+    /// * `RecordNotFound` - No record with this ID in the index
     pub fn delete_record(&mut self, record_id: u64) -> Result<(), DatabaseError> {
         let lookup = self.index.lookup(record_id);
         if let Some(record_pos) = lookup {
@@ -338,6 +395,16 @@ impl Table {
     }
 
     /// Updates a record's content by ID via index lookup.
+    /// If the new content doesn't fit in the current page, the record is
+    /// deleted and re-inserted (possibly on a different page).
+    ///
+    /// # Arguments
+    /// * `record_id` - The record ID to update
+    /// * `record_content` - The new column values to store
+    ///
+    /// # Errors
+    /// * `SchemaViolation` - New content doesn't match table schema
+    /// * `RecordNotFound` - No record with this ID in the index
     pub fn update_record(
         &mut self,
         record_id: u64,

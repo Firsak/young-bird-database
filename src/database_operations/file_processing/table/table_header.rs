@@ -1,6 +1,8 @@
 use super::column_def::ColumnDef;
 use crate::database_operations::file_processing::traits::BinarySerde;
 
+/// Table schema and metadata, stored in the .meta file.
+/// Fixed portion: 14 bytes. Variable portion: one ColumnDef per column.
 #[derive(Debug)]
 pub struct TableHeader {
     // 14 bytes + columns_count * dynamic bytes
