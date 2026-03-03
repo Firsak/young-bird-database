@@ -4,6 +4,7 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 
 /// In-memory hash table using open addressing with linear probing.
 /// Loaded from / flushed to a `.idx` file.
+#[derive(Debug)]
 pub struct HashIndex {
     header: IndexHeader,
     buckets: Vec<IndexEntry>,

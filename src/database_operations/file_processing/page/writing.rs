@@ -78,14 +78,15 @@ pub fn write_new_page(
 }
 
 /// Appends a new record to a page. Writes metadata after existing metadata slots
-/// and content at the end of the page growing backwards. Returns error if not enough free space.
+/// and content at the end of the page growing backwards. Returns the assigned slot_index
+/// on success, or error if not enough free space.
 pub fn add_new_record(
     filename: &str,
     page_number: u64,
     page_kbytes: u32,
     record_id: u64,
     record_content: PageRecordContent,
-) -> Result<(), DatabaseError> {
+) -> Result<u16, DatabaseError> {
     let mut file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -163,7 +164,7 @@ pub fn add_new_record(
         filename,
     )?;
 
-    Ok(())
+    Ok(next_record_index)
 }
 
 /// Scans metadata slots sequentially to find a record by its ID.

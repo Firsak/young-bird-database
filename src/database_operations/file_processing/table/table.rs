@@ -1,6 +1,11 @@
 use super::table_header::TableHeader;
 use crate::database_operations::file_processing::errors::DatabaseError;
-use crate::database_operations::file_processing::page::reading::{read_page, read_page_header};
+use crate::database_operations::file_processing::index::reading::read_index;
+use crate::database_operations::file_processing::index::writing::write_index;
+use crate::database_operations::file_processing::index::HashIndex;
+use crate::database_operations::file_processing::page::reading::{
+    read_page_header, read_record_content, read_record_metadata,
+};
 use crate::database_operations::file_processing::page::record::PageRecordContent;
 use crate::database_operations::file_processing::page::writing::{
     add_new_record, delete_record as page_delete_record, update_record as page_update_record,
@@ -21,6 +26,7 @@ pub struct Table {
     base_path: String,
     pages_per_file: u32,
     header: TableHeader,
+    index: HashIndex,
 }
 
 /// Result of resolving a global page number: which file and which
@@ -32,12 +38,19 @@ pub struct ResolvedPage {
 }
 
 impl Table {
-    pub fn new(name: String, base_path: String, pages_per_file: u32, header: TableHeader) -> Self {
+    pub fn new(
+        name: String,
+        base_path: String,
+        pages_per_file: u32,
+        header: TableHeader,
+        index: HashIndex,
+    ) -> Self {
         Self {
             name,
             base_path,
             pages_per_file,
             header,
+            index,
         }
     }
 
@@ -53,6 +66,21 @@ impl Table {
     /// Returns the path to a .dat file by file index.
     fn dat_path(&self, file_index: u64) -> String {
         format!("{}/{}_{}.dat", self.base_path, self.name, file_index)
+    }
+
+    /// Returns the path to this table's .idx file.
+    fn idx_path(&self) -> String {
+        format!("{}/{}.idx", self.base_path, self.name)
+    }
+
+    /// Persists the current in-memory header to the .meta file.
+    fn save_header(&self) -> Result<(), DatabaseError> {
+        write_table_header(&self.meta_path(), &self.header)
+    }
+
+    /// Persists the current in-memory index to the .idx file.
+    fn save_index(&self) -> Result<(), DatabaseError> {
+        write_index(&self.idx_path(), &self.index)
     }
 
     /// Opens an existing table by reading its .meta file.
@@ -73,11 +101,14 @@ impl Table {
         }
         let meta_path = format!("{}/{}.meta", base_path, name);
         let header = read_table_header(&meta_path)?;
+        let hash_index_path = format!("{}/{}.idx", base_path, name);
+        let index = read_index(&hash_index_path)?;
         Ok(Self {
             name,
             base_path,
             pages_per_file,
             header,
+            index,
         })
     }
 
@@ -118,9 +149,11 @@ impl Table {
             }
         }
         let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, columns);
-        let table = Table::new(name, base_path, pages_per_file, table_header);
-        write_table_header(&table.meta_path(), table.get_header())?;
+        let index = HashIndex::new(16);
+        let table = Table::new(name, base_path, pages_per_file, table_header, index);
+        table.save_header()?;
         write_new_page(&table.dat_path(0), 0, page_kbytes)?;
+        table.save_index()?;
         Ok(table)
     }
 
@@ -224,85 +257,87 @@ impl Table {
             page_kbytes,
         )?;
 
-        let filename_for_desired_page = if last_page_header.get_free_space() < record_size as u32 {
-            let new_page_count = self.get_header().get_pages_count() + 1;
-            self.get_header_mut().update_pages_count(new_page_count);
-            write_table_header(&self.meta_path(), self.get_header())?;
+        let (target_page_number, resolved_page) =
+            if last_page_header.get_free_space() < record_size as u32 {
+                let new_page_count = self.get_header().get_pages_count() + 1;
+                self.get_header_mut().update_pages_count(new_page_count);
+                self.save_header()?;
 
-            let desired_page_number = last_page_number + 1;
-            let filename_for_desired_page = self.resolve_file(desired_page_number)?;
-            write_new_page(
-                &filename_for_desired_page.filename,
-                filename_for_desired_page.local_page_index,
-                page_kbytes,
-            )?;
-            filename_for_desired_page
-        } else {
-            last_page_filename
-        };
-        add_new_record(
-            &filename_for_desired_page.filename,
-            filename_for_desired_page.local_page_index,
+                let desired_page_number = last_page_number + 1;
+                let filename_for_desired_page = self.resolve_file(desired_page_number)?;
+                write_new_page(
+                    &filename_for_desired_page.filename,
+                    filename_for_desired_page.local_page_index,
+                    page_kbytes,
+                )?;
+                (desired_page_number, filename_for_desired_page)
+            } else {
+                (last_page_number, last_page_filename)
+            };
+        let slot_index = add_new_record(
+            &resolved_page.filename,
+            resolved_page.local_page_index,
             page_kbytes,
             record_id,
             record_content,
         )?;
 
+        self.index
+            .insert_entry(record_id, target_page_number, slot_index)?;
+        self.save_index()?;
+
         Ok(())
     }
 
-    /// Reads a record by ID using a linear scan across all pages.
-    /// Returns the record's content, or RecordNotFound if no active
-    /// record with that ID exists.
+    /// Reads a record by ID via index lookup.
+    /// Returns the record's content, or RecordNotFound if not in the index.
     pub fn read_record(&self, record_id: u64) -> Result<PageRecordContent, DatabaseError> {
-        let page_kbytes = self.header.get_page_kbytes();
-        let pages_count = self.header.get_pages_count();
-
-        for page_number in 0..pages_count {
+        let lookup = self.index.lookup(record_id);
+        if let Some(record_pos) = lookup {
+            let page_kbytes = self.header.get_page_kbytes();
+            let page_number = record_pos.0;
+            let slot_index = record_pos.1;
             let resolved_filename = self.resolve_file(page_number)?;
-            let page = read_page(
+            let record_metadata = read_record_metadata(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                slot_index,
+                page_kbytes,
+            )?;
+            let record_content = read_record_content(
                 &resolved_filename.filename,
                 resolved_filename.local_page_index,
                 page_kbytes,
+                &record_metadata,
             )?;
-            for (slot_index, record_metadata) in page.get_records_metadata().iter().enumerate() {
-                if record_metadata.get_id() == record_id {
-                    let record_content = page.get_record_content_by_slot_index(slot_index);
-                    let new_record = PageRecordContent::new(record_content.get_content().clone());
-                    return Ok(new_record);
-                }
-            }
+            return Ok(record_content);
         }
+
         Err(DatabaseError::RecordNotFound(record_id))
     }
 
-    /// Deletes a record by ID. Scans pages to find the record,
-    /// then delegates to the page-level delete.
+    /// Deletes a record by ID via index lookup.
+    /// Removes the record from the page and from the index.
     pub fn delete_record(&mut self, record_id: u64) -> Result<(), DatabaseError> {
-        let page_kbytes = self.header.get_page_kbytes();
-        let pages_count = self.header.get_pages_count();
-
-        for page_number in 0..pages_count {
+        let lookup = self.index.lookup(record_id);
+        if let Some(record_pos) = lookup {
+            let page_kbytes = self.header.get_page_kbytes();
+            let page_number = record_pos.0;
             let resolved_filename = self.resolve_file(page_number)?;
-            let delete_result = page_delete_record(
+            page_delete_record(
                 &resolved_filename.filename,
                 resolved_filename.local_page_index,
                 page_kbytes,
                 record_id,
-            );
-            match delete_result {
-                Ok(_) => return Ok(()),
-                Err(error) => match error {
-                    DatabaseError::RecordNotFound(_) => continue,
-                    _ => return Err(error),
-                },
-            }
+            )?;
+            self.index.remove_entry(record_id)?;
+            self.save_index()?;
+            return Ok(());
         }
         Err(DatabaseError::RecordNotFound(record_id))
     }
 
-    /// Updates a record's content by ID. Scans pages to find the record,
-    /// then delegates to the page-level update.
+    /// Updates a record's content by ID via index lookup.
     pub fn update_record(
         &mut self,
         record_id: u64,
@@ -310,10 +345,10 @@ impl Table {
     ) -> Result<(), DatabaseError> {
         self.validate_record(&record_content)?;
 
-        let page_kbytes = self.header.get_page_kbytes();
-        let pages_count = self.header.get_pages_count();
-
-        for page_number in 0..pages_count {
+        let lookup = self.index.lookup(record_id);
+        if let Some(record_pos) = lookup {
+            let page_kbytes = self.header.get_page_kbytes();
+            let page_number = record_pos.0;
             let resolved_filename = self.resolve_file(page_number)?;
             let update_result = page_update_record(
                 &resolved_filename.filename,
@@ -322,10 +357,11 @@ impl Table {
                 record_id,
                 record_content.clone(),
             );
-            match update_result {
-                Ok(_) => return Ok(()),
-                Err(error) => match error {
-                    DatabaseError::RecordNotFound(_) => continue,
+            if let Err(error) = update_result {
+                match error {
+                    DatabaseError::RecordNotFound(_) => {
+                        return Err(DatabaseError::RecordNotFound(record_id))
+                    }
                     DatabaseError::PageFull => {
                         page_delete_record(
                             &resolved_filename.filename,
@@ -333,12 +369,15 @@ impl Table {
                             page_kbytes,
                             record_id,
                         )?;
+                        self.index.remove_entry(record_id)?;
+                        self.save_index()?;
                         self.insert_record(record_id, record_content)?;
                         return Ok(());
                     }
                     _ => return Err(error),
-                },
+                }
             }
+            return Ok(());
         }
         Err(DatabaseError::RecordNotFound(record_id))
     }
@@ -387,6 +426,7 @@ mod tests {
                 8,
                 vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
             ),
+            HashIndex::new(16),
         )
     }
 
