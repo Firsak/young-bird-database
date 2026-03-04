@@ -3,13 +3,18 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::index::reading::read_index;
 use crate::database_operations::file_processing::index::writing::write_index;
 use crate::database_operations::file_processing::index::HashIndex;
+use crate::database_operations::file_processing::page::header::{self, PageHeader};
+use crate::database_operations::file_processing::page::offsets;
+use crate::database_operations::file_processing::page::page::Page;
 use crate::database_operations::file_processing::page::reading::{
-    read_page_header, read_record_content, read_record_metadata,
+    read_page, read_page_header, read_record_content, read_record_metadata,
 };
-use crate::database_operations::file_processing::page::record::PageRecordContent;
+use crate::database_operations::file_processing::page::record::{
+    PageRecordContent, PageRecordMetadata,
+};
 use crate::database_operations::file_processing::page::writing::{
     add_new_record, delete_record as page_delete_record, update_record as page_update_record,
-    write_new_page,
+    write_new_page, write_page,
 };
 use crate::database_operations::file_processing::table::reading::read_table_header;
 use crate::database_operations::file_processing::table::writing::write_table_header;
@@ -447,6 +452,133 @@ impl Table {
             return Ok(());
         }
         Err(DatabaseError::RecordNotFound(record_id))
+    }
+
+    /// Compacts the table by repacking all records into the minimum number of pages.
+    /// Reads one source page at a time and builds target pages sequentially.
+    /// Only 2 pages are held in memory at once (source + target).
+    ///
+    /// # Algorithm
+    /// 1. Stream records page by page, packing into target pages from page 0
+    ///    (read_page skips soft-deleted records, so fragmentation is eliminated automatically)
+    /// 2. Trim trailing empty pages (keep at least 1)
+    ///
+    /// # Returns
+    /// Number of pages freed by compaction.
+    pub fn compact_table(&mut self) -> Result<u32, DatabaseError> {
+        let page_kbytes = self.header.get_page_kbytes();
+        let page_size = page_kbytes as usize * KBYTES;
+        let total_pages = self.header.get_pages_count();
+
+        let mut target_page_num: u64 = 0;
+        let new_page_header =
+            PageHeader::new(target_page_num, 0, 0, (page_size - HEADER_SIZE) as u32, 0);
+        let mut target_page = Page::new(new_page_header, vec![], vec![]);
+
+        for process_page_num in 0..total_pages {
+            let resolved_filename_to_process = self.resolve_file(process_page_num)?;
+            let process_page = read_page(
+                &resolved_filename_to_process.filename,
+                resolved_filename_to_process.local_page_index,
+                page_kbytes,
+            )?;
+            for (record_metadata_index, record_metadata) in
+                process_page.get_records_metadata().iter().enumerate()
+            {
+                let record_content =
+                    process_page.get_record_content_by_slot_index(record_metadata_index);
+                if target_page.header.get_free_space()
+                    < PAGE_RECORD_METADATA_SIZE as u32 + record_metadata.get_content_size()
+                {
+                    let target_filename = self.resolve_file(target_page_num)?;
+                    write_page(
+                        &target_filename.filename,
+                        target_filename.local_page_index,
+                        page_kbytes,
+                        &target_page,
+                    )?;
+                    target_page_num += 1;
+                    let new_page_header =
+                        PageHeader::new(target_page_num, 0, 0, (page_size - HEADER_SIZE) as u32, 0);
+                    target_page = Page::new(new_page_header, vec![], vec![]);
+                }
+
+                let last_record = target_page.get_records_metadata().last();
+                let new_record_offset = offsets::page_record_content_offset_relative_page_end(
+                    page_size,
+                    last_record,
+                    record_metadata.get_content_size() as usize,
+                );
+                let new_record_metadata = PageRecordMetadata::new(
+                    record_metadata.get_id(),
+                    new_record_offset as u32,
+                    record_metadata.get_content_size(),
+                    false,
+                );
+                target_page.append_record(new_record_metadata, record_content.clone());
+                target_page
+                    .header
+                    .update_records_count(target_page.header.get_records_count() + 1);
+                target_page.header.update_free_space(
+                    target_page.header.get_free_space()
+                        - PAGE_RECORD_METADATA_SIZE as u32
+                        - record_metadata.get_content_size(),
+                );
+                self.index.update_entry(
+                    record_metadata.get_id(),
+                    target_page_num,
+                    target_page.header.get_records_count() - 1,
+                )?;
+            }
+        }
+
+        let target_filename = self.resolve_file(target_page_num)?;
+        write_page(
+            &target_filename.filename,
+            target_filename.local_page_index,
+            page_kbytes,
+            &target_page,
+        )?;
+
+        // Trim: update pages_count to target_page_num + 1 (keep at least 1 page)
+        let new_pages_count = target_page_num + 1;
+        let pages_freed = total_pages.saturating_sub(new_pages_count) as u32;
+
+        self.header.update_pages_count(new_pages_count);
+        self.save_header()?;
+        self.save_index()?;
+
+        Ok(pages_freed)
+    }
+
+    /// Returns the fraction of total page space wasted by fragmentation and sparse pages.
+    /// 0.0 = perfectly packed, 1.0 = all space wasted.
+    /// Scans all page headers (20 bytes each, no record data read).
+    ///
+    /// # Formula
+    /// `wasted = sum(free_space + fragmented_space)` across all pages
+    /// `capacity = sum(page_size - HEADER_SIZE)` across all pages
+    /// `ratio = wasted / capacity`
+    pub fn fragmentation_ratio(&self) -> Result<f64, DatabaseError> {
+        let page_kbytes = self.header.get_page_kbytes();
+        let page_size = page_kbytes as usize * KBYTES;
+        let page_capacity = (page_size - HEADER_SIZE) as u64;
+        let total_pages = self.header.get_pages_count();
+        let mut wasted: u64 = 0;
+
+        for page_num in 0..total_pages {
+            let resolved_filename = self.resolve_file(page_num)?;
+            let header = read_page_header(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                page_kbytes,
+            )?;
+            wasted += header.get_free_space() as u64 + header.get_fragment_space() as u64;
+        }
+
+        let ratio = wasted as f64 / (total_pages * page_capacity) as f64;
+
+        Ok(ratio)
     }
 
     /// Given a global page number, returns the .dat filename and

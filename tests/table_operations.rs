@@ -792,3 +792,288 @@ fn open_with_empty_name_rejected() {
     );
     assert!(result.is_err(), "Should reject empty table name on open");
 }
+
+// ══════════════════════════════════════════════════════════
+// fragmentation_ratio tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn fragmentation_ratio_fresh_table() {
+    let (table, dir) = create_test_table("frag_fresh");
+
+    // Fresh table: 1 page with 0 records → all usable space is "wasted" (free)
+    let ratio = table.fragmentation_ratio().expect("Failed to get ratio");
+    assert!(
+        (ratio - 1.0).abs() < 0.01,
+        "Fresh empty table should have ratio near 1.0, got {}",
+        ratio
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn fragmentation_ratio_after_inserts() {
+    let (mut table, dir) = create_test_table("frag_after_inserts");
+
+    // Insert several records — free space shrinks, ratio drops below 1.0
+    for i in 1..=10 {
+        table
+            .insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("insert failed");
+    }
+
+    let ratio = table.fragmentation_ratio().expect("Failed to get ratio");
+    assert!(
+        ratio < 1.0,
+        "After inserts, ratio should be below 1.0, got {}",
+        ratio
+    );
+    assert!(
+        ratio > 0.0,
+        "Page still has some free space, got {}",
+        ratio
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn fragmentation_ratio_after_deletes() {
+    let (mut table, dir) = create_test_table("frag_after_deletes");
+
+    for i in 1..=10 {
+        table
+            .insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("insert failed");
+    }
+    let ratio_before = table.fragmentation_ratio().expect("ratio before");
+
+    // Delete half the records — creates fragmented space
+    for i in 1..=5 {
+        table.delete_record(i).expect("delete failed");
+    }
+    let ratio_after = table.fragmentation_ratio().expect("ratio after");
+
+    assert!(
+        ratio_after > ratio_before,
+        "Ratio should increase after deletes: before={}, after={}",
+        ratio_before,
+        ratio_after
+    );
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// compact_table tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn compact_table_no_fragmentation() {
+    let (mut table, dir) = create_test_table("compact_no_frag");
+
+    // Insert a few small records into 1 page, no deletes
+    for i in 1..=5 {
+        table
+            .insert_record(i, make_record(i as i64, &format!("item_{}", i)))
+            .expect("insert failed");
+    }
+
+    let pages_freed = table.compact_table().expect("compact failed");
+    assert_eq!(pages_freed, 0, "No pages should be freed when there's no fragmentation");
+
+    // Records should still be readable
+    for i in 1..=5 {
+        let content = table.read_record(i).expect(&format!("record {} missing after compact", i));
+        assert_eq!(content.get_content()[0], ContentTypes::Int64(i as i64));
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_table_consolidates_sparse_pages() {
+    let (mut table, dir) = create_test_table("compact_sparse");
+
+    // Insert large records to force multiple pages
+    let big_name = "c".repeat(2000);
+    for i in 1..=10 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect("insert failed");
+    }
+    let pages_before = table.get_header().get_pages_count();
+    assert!(pages_before > 1, "Need multiple pages for this test");
+
+    // Delete most records, leaving only 2 that fit in 1 page
+    for i in 3..=10 {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    let pages_freed = table.compact_table().expect("compact failed");
+    assert!(pages_freed > 0, "Should have freed at least 1 page");
+
+    let pages_after = table.get_header().get_pages_count();
+    assert!(
+        pages_after < pages_before,
+        "Pages count should decrease: before={}, after={}",
+        pages_before,
+        pages_after
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_table_all_deleted() {
+    let (mut table, dir) = create_test_table("compact_all_deleted");
+
+    for i in 1..=5 {
+        table
+            .insert_record(i, make_record(i as i64, "temp"))
+            .expect("insert failed");
+    }
+
+    for i in 1..=5 {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    table.compact_table().expect("compact failed");
+
+    // Should have exactly 1 page (minimum)
+    assert_eq!(
+        table.get_header().get_pages_count(),
+        1,
+        "Should keep at least 1 page"
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_table_preserves_data() {
+    let (mut table, dir) = create_test_table("compact_preserves");
+
+    let big_name = "p".repeat(2000);
+    for i in 1..=8 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect("insert failed");
+    }
+
+    // Delete odd-numbered records (creates holes across multiple pages)
+    for i in [1, 3, 5, 7] {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    table.compact_table().expect("compact failed");
+
+    // Surviving even records should have correct content
+    for i in [2, 4, 6, 8] {
+        let content = table.read_record(i).expect(&format!("record {} missing", i));
+        assert_eq!(content.get_content()[0], ContentTypes::Int64(i as i64));
+        assert_eq!(
+            content.get_content()[1],
+            ContentTypes::Text(big_name.clone())
+        );
+    }
+
+    // Deleted records should remain gone
+    for i in [1, 3, 5, 7] {
+        assert!(table.read_record(i).is_err(), "record {} should be deleted", i);
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_table_updates_index() {
+    let (mut table, dir) = create_test_table("compact_index");
+
+    let big_name = "i".repeat(2000);
+    for i in 1..=6 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect("insert failed");
+    }
+
+    // Delete first 4 — only records 5 and 6 survive
+    for i in 1..=4 {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    table.compact_table().expect("compact failed");
+
+    // Index-based reads should still work for surviving records
+    let c5 = table.read_record(5).expect("record 5 missing");
+    assert_eq!(c5.get_content()[0], ContentTypes::Int64(5));
+
+    let c6 = table.read_record(6).expect("record 6 missing");
+    assert_eq!(c6.get_content()[0], ContentTypes::Int64(6));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_table_reopen_after_compact() {
+    let (mut table, dir) = create_test_table("compact_reopen");
+
+    let big_name = "r".repeat(2000);
+    for i in 1..=6 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect("insert failed");
+    }
+
+    for i in 1..=4 {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    table.compact_table().expect("compact failed");
+
+    // Reopen the table from disk
+    let reopened = Table::open("items".to_string(), dir.clone(), 5)
+        .expect("Failed to reopen after compact");
+
+    // Records 5 and 6 should be readable from reopened table
+    let c5 = reopened.read_record(5).expect("record 5 missing after reopen");
+    assert_eq!(c5.get_content()[0], ContentTypes::Int64(5));
+
+    let c6 = reopened.read_record(6).expect("record 6 missing after reopen");
+    assert_eq!(c6.get_content()[0], ContentTypes::Int64(6));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn fragmentation_ratio_decreases_after_compact() {
+    let (mut table, dir) = create_test_table("frag_after_compact");
+
+    let big_name = "f".repeat(2000);
+    for i in 1..=8 {
+        table
+            .insert_record(i, make_record(i as i64, &big_name))
+            .expect("insert failed");
+    }
+
+    // Delete most records to create fragmentation
+    for i in 1..=6 {
+        table.delete_record(i).expect("delete failed");
+    }
+
+    let ratio_before = table.fragmentation_ratio().expect("ratio before");
+
+    table.compact_table().expect("compact failed");
+
+    let ratio_after = table.fragmentation_ratio().expect("ratio after");
+
+    assert!(
+        ratio_after <= ratio_before,
+        "Ratio should decrease after compact: before={}, after={}",
+        ratio_before,
+        ratio_after
+    );
+
+    cleanup_dir(&dir);
+}
