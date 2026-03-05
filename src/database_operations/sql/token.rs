@@ -97,7 +97,7 @@ pub enum Token {
     Identifier(String),
 
     // Literal values
-    IntegerLiteral(i64),   // 42, 0, 999
+    IntegerLiteral(u64),   // 42, 0, 999
     FloatLiteral(f64),     // 3.14, 0.5
     StringLiteral(String), // 'hello', 'it''s'
     BooleanLiteral(bool),  // TRUE, FALSE

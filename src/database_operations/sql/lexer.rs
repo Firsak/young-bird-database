@@ -1,6 +1,5 @@
 use super::token::{Keyword, Token};
 
-// TODO(human): Implement read_identifier_or_keyword() method
 pub struct Lexer {
     input: Vec<char>,
     position: usize,
@@ -22,6 +21,10 @@ impl Lexer {
         let value = self.input.get(self.position).copied();
         self.position += 1;
         value
+    }
+
+    fn peek_next(&self) -> Option<char> {
+        self.input.get(self.position + 1).copied()
     }
 
     fn skip_whitespace(&mut self) {
@@ -46,9 +49,47 @@ impl Lexer {
                     let token = self.read_identifier_or_keyword();
                     tokens.push(token);
                 }
-                c if c.is_ascii_digit() => todo!(),
-                '\'' => todo!(),
-                '<' | '>' | '!' => todo!(),
+                c if c.is_ascii_digit() => {
+                    let token = self.read_number()?;
+                    tokens.push(token);
+                }
+                '\'' => {
+                    let token = self.read_string()?;
+                    tokens.push(token);
+                }
+                '<' => {
+                    let possible_next_char = self.peek_next();
+                    if let Some(c) = possible_next_char && c == '=' {
+                        self.advance();
+                        tokens.push(Token::LessEqual);
+                    } else if let Some(c) = possible_next_char && c == '>'  {
+                        self.advance();
+                        tokens.push(Token::NotEquals);
+                    } else {
+                        tokens.push(Token::LessThan);
+                    }
+                    self.advance();
+                }
+                '>' => {
+                    let possible_next_char = self.peek_next();
+                    if let Some(c) = possible_next_char && c == '=' {
+                        self.advance();
+                        tokens.push(Token::GreaterEqual);
+                    } else {
+                        tokens.push(Token::GreaterThan);
+                    }
+                    self.advance();
+                }
+                '!' => {
+                    let possible_next_char = self.peek_next();
+                    if let Some(c) = possible_next_char && c == '=' {
+                        self.advance();
+                        tokens.push(Token::NotEquals);
+                    } else {
+                        return Err("Bare \"!\" is not valid".to_string());
+                    }
+                    self.advance();
+                }
                 '=' => {
                     self.advance();
                     tokens.push(Token::Equals);
@@ -105,5 +146,81 @@ impl Lexer {
         } else {
             Token::Identifier(token_string)
         }
+    }
+
+    fn read_number(&mut self) -> Result<Token, String> {
+        let mut future_token: Vec<char> = vec![];
+        // Current problem: the single loop collects digits AND dots together.
+        // When we hit '.', we push it into future_token and advance BEFORE checking
+        // if the next char is a digit. So on input "3.", the dot is already consumed
+        // and we can't "undo" it — we return an error even though "3" alone is valid.
+        //
+        // Fix: use two separate loops.
+        // Loop 1: collect only digits (stop when peek is NOT a digit)
+        // Then:   if peek is '.' AND the char at position+2 is a digit,
+        //         consume the dot + run loop 2 for fractional digits
+        //         if peek is '.' but next is NOT a digit, leave dot alone — "3" is valid
+        // Finally: parse collected chars as u64 (no dot) or f64 (has dot)
+        while let Some(c) = self.peek() && (c.is_ascii_digit() || c == '.'){
+            if c == '.' {
+                if let Some(char_after_dot) = self.peek_next() && char_after_dot.is_ascii_digit() {
+                    future_token.push(c);
+                    self.advance();
+                    future_token.push(char_after_dot);
+                    self.advance();
+                    while let Some(inner_c) = self.peek() && inner_c.is_ascii_digit() {
+                        future_token.push(inner_c);
+                        self.advance();
+                    }
+                    break;
+                } else {
+                    break;
+                }
+            } else {
+                future_token.push(c);
+                self.advance();
+            }
+        }
+
+        let token_string: String = future_token.iter().collect();
+        let token_u64_res = token_string.parse::<u64>();
+        if let Ok(token_u64) = token_u64_res {
+            return Ok(Token::IntegerLiteral(token_u64));
+        }
+        let token_f64_res = token_string.parse::<f64>();
+        if let Ok(token_f64) = token_f64_res {
+            return Ok(Token::FloatLiteral(token_f64));
+        }
+
+        Err(format!(
+            "Could not convert {} into number",
+            token_string.as_str()
+        ))
+    }
+
+    fn read_string(&mut self) -> Result<Token, String> {
+        let mut future_token: Vec<char> = vec![];
+        loop {
+            self.advance();
+            let current_char = self.peek();
+            match current_char {
+                None => return Err("No closing \"'\" symbol".to_string()),
+                Some(c) => {
+                    if c != '\'' {
+                        future_token.push(c);
+                        continue;
+                    }
+                    if let Some(maybe_extra) = self.peek_next() && maybe_extra == '\'' {
+                        future_token.push('\'');
+                        self.advance();
+                    } else {
+                        self.advance();
+                        break;
+                    }
+                }
+            }
+        }
+        let token_string: String = future_token.iter().collect();
+        Ok(Token::StringLiteral(token_string))
     }
 }
