@@ -1,3 +1,12 @@
+// Lexer: SQL string → Vec<Token>
+//
+// "SELECT * FROM users WHERE age >= 18"
+//  → [Keyword(Select), Asterisk, Keyword(From), Identifier("users"),
+//     Keyword(Where), Identifier("age"), GreaterEqual, IntegerLiteral(18)]
+//
+// Input: &str (raw SQL text, character by character)
+// Output: Vec<Token> (classified pieces — keywords, identifiers, literals, operators)
+
 use super::token::{Keyword, Token};
 
 pub struct Lexer {
@@ -222,5 +231,67 @@ impl Lexer {
         }
         let token_string: String = future_token.iter().collect();
         Ok(Token::StringLiteral(token_string))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_identifier() {
+        let mut lexer = Lexer::new("users");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::Identifier("users".to_string())]);
+    }
+
+    #[test]
+    fn read_keyword() {
+        let mut lexer = Lexer::new("SELECT");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::Keyword(Keyword::Select)]);
+    }
+
+    #[test]
+    fn read_boolean_true() {
+        let mut lexer = Lexer::new("TRUE");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::BooleanLiteral(true)]);
+    }
+
+    #[test]
+    fn read_integer() {
+        let mut lexer = Lexer::new("42");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::IntegerLiteral(42)]);
+    }
+
+    #[test]
+    fn read_float() {
+        let mut lexer = Lexer::new("3.14");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::FloatLiteral(3.14)]);
+    }
+
+    #[test]
+    fn read_float_no_fraction() {
+        let mut lexer = Lexer::new("3.");
+        // "3." should parse as integer 3, dot left unconsumed (causes error)
+        let result = lexer.tokenize();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_string_simple() {
+        let mut lexer = Lexer::new("'hello'");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::StringLiteral("hello".to_string())]);
+    }
+
+    #[test]
+    fn read_string_empty() {
+        let mut lexer = Lexer::new("''");
+        let tokens = lexer.tokenize().unwrap();
+        assert_eq!(tokens, vec![Token::StringLiteral("".to_string())]);
     }
 }

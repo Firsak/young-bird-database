@@ -118,3 +118,41 @@ pub enum Token {
     Asterisk,   // *
     Minus,      // -
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_keyword_select() {
+        assert_eq!(Keyword::parse_keyword("SELECT"), Some(Keyword::Select));
+    }
+
+    #[test]
+    fn parse_keyword_case_insensitive() {
+        assert_eq!(Keyword::parse_keyword("select"), Some(Keyword::Select));
+        assert_eq!(Keyword::parse_keyword("Select"), Some(Keyword::Select));
+    }
+
+    #[test]
+    fn parse_keyword_unknown() {
+        assert_eq!(Keyword::parse_keyword("BIGINT"), None);
+        assert_eq!(Keyword::parse_keyword("VARCHAR"), None);
+    }
+
+    #[test]
+    fn parse_keyword_all_types() {
+        assert_eq!(Keyword::parse_keyword("BOOLEAN"), Some(Keyword::Boolean));
+        assert_eq!(Keyword::parse_keyword("TEXT"), Some(Keyword::Text));
+        assert_eq!(Keyword::parse_keyword("INT8"), Some(Keyword::Int8));
+        assert_eq!(Keyword::parse_keyword("INT16"), Some(Keyword::Int16));
+        assert_eq!(Keyword::parse_keyword("INT32"), Some(Keyword::Int32));
+        assert_eq!(Keyword::parse_keyword("INT64"), Some(Keyword::Int64));
+        assert_eq!(Keyword::parse_keyword("UINT8"), Some(Keyword::UInt8));
+        assert_eq!(Keyword::parse_keyword("UINT16"), Some(Keyword::UInt16));
+        assert_eq!(Keyword::parse_keyword("UINT32"), Some(Keyword::UInt32));
+        assert_eq!(Keyword::parse_keyword("UINT64"), Some(Keyword::UInt64));
+        assert_eq!(Keyword::parse_keyword("FLOAT32"), Some(Keyword::Float32));
+        assert_eq!(Keyword::parse_keyword("FLOAT64"), Some(Keyword::Float64));
+    }
+}
