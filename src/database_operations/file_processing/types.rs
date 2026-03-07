@@ -22,7 +22,7 @@ pub enum ContentTypes {
 
 /// Schema-level column type. Single tag byte (0–11).
 /// Used in ColumnDef to define what values a column accepts.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ColumnTypes {
     Boolean, //  0
     Text,    //  1

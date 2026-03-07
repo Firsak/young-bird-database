@@ -37,6 +37,7 @@ fn write_and_read_table_header() {
         10, // pages_count
         3,  // columns_count
         8,  // page_kbytes
+        0,  // next_record_id
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -58,7 +59,7 @@ fn write_and_read_table_header() {
 fn write_and_read_empty_table_header() {
     let filename = &temp_meta("write_and_read_empty_table_header");
 
-    let header = TableHeader::new(0, 0, 8, vec![]);
+    let header = TableHeader::new(0, 0, 8, 0, vec![]);
 
     table::writing::write_table_header(filename, &header).expect("Failed to write table header");
 
@@ -79,6 +80,7 @@ fn overwrite_table_header() {
         5,
         2,
         8,
+        0,
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -91,6 +93,7 @@ fn overwrite_table_header() {
         5,
         1,
         16,
+        0,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
     table::writing::write_table_header(filename, &header_v2).expect("Failed to write v2");
@@ -801,11 +804,11 @@ fn open_with_empty_name_rejected() {
 fn fragmentation_ratio_fresh_table() {
     let (table, dir) = create_test_table("frag_fresh");
 
-    // Fresh table: 1 page with 0 records → all usable space is "wasted" (free)
+    // Fresh table: 1 page (last page) with no fragmented space → ratio 0.0
     let ratio = table.fragmentation_ratio().expect("Failed to get ratio");
     assert!(
-        (ratio - 1.0).abs() < 0.01,
-        "Fresh empty table should have ratio near 1.0, got {}",
+        ratio == 0.0,
+        "Fresh empty table should have ratio 0.0, got {}",
         ratio
     );
 
@@ -816,7 +819,7 @@ fn fragmentation_ratio_fresh_table() {
 fn fragmentation_ratio_after_inserts() {
     let (mut table, dir) = create_test_table("frag_after_inserts");
 
-    // Insert several records — free space shrinks, ratio drops below 1.0
+    // Insert several records into single page — no fragmentation, no deleted records
     for i in 1..=10 {
         table
             .insert_record(i, make_record(i as i64, &format!("item_{}", i)))
@@ -825,13 +828,8 @@ fn fragmentation_ratio_after_inserts() {
 
     let ratio = table.fragmentation_ratio().expect("Failed to get ratio");
     assert!(
-        ratio < 1.0,
-        "After inserts, ratio should be below 1.0, got {}",
-        ratio
-    );
-    assert!(
-        ratio > 0.0,
-        "Page still has some free space, got {}",
+        ratio == 0.0,
+        "Single page with no deletes should have ratio 0.0, got {}",
         ratio
     );
 
@@ -1074,6 +1072,344 @@ fn fragmentation_ratio_decreases_after_compact() {
         ratio_before,
         ratio_after
     );
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Auto-increment insert tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn insert_auto_increment_ids() {
+    let (mut table, dir) = create_test_table("insert_auto_ids");
+
+    let id0 = table
+        .insert(make_record(10, "alice"))
+        .expect("insert 0 failed");
+    let id1 = table
+        .insert(make_record(20, "bob"))
+        .expect("insert 1 failed");
+    let id2 = table
+        .insert(make_record(30, "carol"))
+        .expect("insert 2 failed");
+
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+
+    // Records are readable by the returned IDs
+    let c0 = table.read_record(id0).expect("read 0 failed");
+    assert_eq!(c0.get_content()[0], ContentTypes::Int64(10));
+
+    let c2 = table.read_record(id2).expect("read 2 failed");
+    assert_eq!(c2.get_content()[1], ContentTypes::Text("carol".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn insert_auto_increment_persists_across_reopen() {
+    let (mut table, dir) = create_test_table("insert_auto_reopen");
+
+    table.insert(make_record(1, "first")).expect("insert failed");
+    table.insert(make_record(2, "second")).expect("insert failed");
+
+    // Reopen the table from disk
+    let mut reopened = Table::open("items".to_string(), dir.clone(), 5)
+        .expect("reopen failed");
+
+    let id = reopened
+        .insert(make_record(3, "third"))
+        .expect("insert after reopen failed");
+
+    // next_record_id was 2 before reopen, so this should be 2
+    assert_eq!(id, 2);
+
+    // All three records should be readable
+    let c0 = reopened.read_record(0).expect("read 0 failed");
+    assert_eq!(c0.get_content()[1], ContentTypes::Text("first".to_string()));
+
+    let c2 = reopened.read_record(2).expect("read 2 failed");
+    assert_eq!(c2.get_content()[1], ContentTypes::Text("third".to_string()));
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// scan_records tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn scan_records_all() {
+    let (mut table, dir) = create_test_table("scan_all");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    let results = table
+        .scan_records(|_id, _cols| true)
+        .expect("scan failed");
+
+    assert_eq!(results.len(), 3);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_records_with_filter() {
+    let (mut table, dir) = create_test_table("scan_filter");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    // Filter: only records where the Int64 column > 15
+    let results = table
+        .scan_records(|_id, cols| {
+            if let ContentTypes::Int64(v) = &cols[0] {
+                *v > 15
+            } else {
+                false
+            }
+        })
+        .expect("scan failed");
+
+    assert_eq!(results.len(), 2);
+
+    // Verify the matching records have the right values
+    let values: Vec<i64> = results
+        .iter()
+        .map(|(_id, content)| {
+            if let ContentTypes::Int64(v) = &content.get_content()[0] {
+                *v
+            } else {
+                panic!("expected Int64");
+            }
+        })
+        .collect();
+    assert!(values.contains(&20));
+    assert!(values.contains(&30));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_records_after_delete() {
+    let (mut table, dir) = create_test_table("scan_after_del");
+
+    let id0 = table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    table.delete_record(id0).expect("delete failed");
+
+    let results = table
+        .scan_records(|_id, _cols| true)
+        .expect("scan failed");
+
+    assert_eq!(results.len(), 2, "deleted record should not appear in scan");
+
+    // Verify the deleted record's ID is not in results
+    let ids: Vec<u64> = results.iter().map(|(id, _)| *id).collect();
+    assert!(!ids.contains(&id0));
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// scan_record_ids + delete tests (two-phase delete)
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn scan_delete_all_records() {
+    let (mut table, dir) = create_test_table("scan_del_all");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    let ids = table.scan_record_ids(|_id, _cols| true).expect("scan failed");
+    assert_eq!(ids.len(), 3);
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 0);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_with_filter() {
+    let (mut table, dir) = create_test_table("scan_del_filter");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    // Delete only records where Int64 column > 15
+    let ids = table
+        .scan_record_ids(|_id, cols| {
+            if let ContentTypes::Int64(v) = &cols[0] {
+                *v > 15
+            } else {
+                false
+            }
+        })
+        .expect("scan failed");
+    assert_eq!(ids.len(), 2);
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    // Only alice (10) should remain
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].1.get_content()[0], ContentTypes::Int64(10));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_none_matching() {
+    let (mut table, dir) = create_test_table("scan_del_none");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+
+    let ids = table.scan_record_ids(|_id, _cols| false).expect("scan failed");
+    assert_eq!(ids.len(), 0);
+
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 2);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_by_id() {
+    let (mut table, dir) = create_test_table("scan_del_by_id");
+
+    let id0 = table.insert(make_record(10, "alice")).expect("insert failed");
+    let id1 = table.insert(make_record(20, "bob")).expect("insert failed");
+    let id2 = table.insert(make_record(30, "carol")).expect("insert failed");
+
+    let ids = table.scan_record_ids(|id, _cols| id == id1).expect("scan failed");
+    assert_eq!(ids, vec![id1]);
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    table.read_record(id0).expect("id0 should exist");
+    table.read_record(id2).expect("id2 should exist");
+    assert!(table.read_record(id1).is_err(), "id1 should be deleted");
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_across_pages() {
+    let (mut table, dir) = create_test_table("scan_del_pages");
+
+    let big_name = "x".repeat(2000);
+    for _ in 0..6 {
+        table.insert(make_record(1, &big_name)).expect("insert failed");
+    }
+    assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
+
+    let ids = table.scan_record_ids(|_id, _cols| true).expect("scan failed");
+    assert_eq!(ids.len(), 6);
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 0);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_records_are_not_in_index() {
+    let (mut table, dir) = create_test_table("scan_del_index");
+
+    let id0 = table.insert(make_record(10, "alice")).expect("insert failed");
+    let id1 = table.insert(make_record(20, "bob")).expect("insert failed");
+
+    let ids = table.scan_record_ids(|id, _cols| id == id0).expect("scan failed");
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    assert!(table.read_record(id0).is_err());
+    let content = table.read_record(id1).expect("id1 should exist");
+    assert_eq!(content.get_content()[0], ContentTypes::Int64(20));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_after_previous_deletes() {
+    let (mut table, dir) = create_test_table("scan_del_prev_del");
+
+    let _id0 = table.insert(make_record(10, "alice")).expect("insert failed");
+    let id1 = table.insert(make_record(20, "bob")).expect("insert failed");
+    let _id2 = table.insert(make_record(30, "carol")).expect("insert failed");
+    let _id3 = table.insert(make_record(40, "dave")).expect("insert failed");
+
+    // Soft-delete a middle record first
+    table.delete_record(id1).expect("delete failed");
+
+    // Now scan and delete remaining records where value > 25
+    let ids = table
+        .scan_record_ids(|_id, cols| {
+            if let ContentTypes::Int64(v) = &cols[0] {
+                *v > 25
+            } else {
+                false
+            }
+        })
+        .expect("scan failed");
+    assert_eq!(ids.len(), 2, "should find carol and dave");
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].1.get_content()[0], ContentTypes::Int64(10));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn scan_delete_cascade_hard_deletes() {
+    let (mut table, dir) = create_test_table("scan_del_cascade");
+
+    table.insert(make_record(10, "alice")).expect("insert failed");
+    table.insert(make_record(20, "bob")).expect("insert failed");
+    table.insert(make_record(30, "carol")).expect("insert failed");
+
+    let ids = table
+        .scan_record_ids(|_id, cols| {
+            if let ContentTypes::Int64(v) = &cols[0] {
+                *v > 15
+            } else {
+                false
+            }
+        })
+        .expect("scan failed");
+    assert_eq!(ids.len(), 2);
+    for id in &ids {
+        table.delete_record(*id).expect("delete failed");
+    }
+
+    let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].1.get_content()[0], ContentTypes::Int64(10));
 
     cleanup_dir(&dir);
 }

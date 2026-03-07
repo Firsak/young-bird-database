@@ -6,7 +6,7 @@ use crate::database_operations::file_processing::HEADER_SIZE;
 
 /// Fixed 20-byte header at the start of each page.
 /// Tracks record count, deletion state, and space availability.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PageHeader {
     // 20 bytes
     pub(in crate::database_operations::file_processing) page_number: u64, // 8 bytes

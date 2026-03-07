@@ -3,7 +3,7 @@ use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::index::reading::read_index;
 use crate::database_operations::file_processing::index::writing::write_index;
 use crate::database_operations::file_processing::index::HashIndex;
-use crate::database_operations::file_processing::page::header::{self, PageHeader};
+use crate::database_operations::file_processing::page::header::PageHeader;
 use crate::database_operations::file_processing::page::offsets;
 use crate::database_operations::file_processing::page::page::Page;
 use crate::database_operations::file_processing::page::reading::{
@@ -171,7 +171,8 @@ impl Table {
                 ));
             }
         }
-        let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, columns);
+        // TODO: reject duplicate column names
+        let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, 0, columns);
         let index = HashIndex::new(16);
         let table = Table::new(name, base_path, pages_per_file, table_header, index);
         table.save_header()?;
@@ -268,6 +269,25 @@ impl Table {
         }
 
         Ok(())
+    }
+
+    /// Inserts a record with an auto-incremented ID.
+    /// Uses `next_record_id` from the table header, then delegates to `insert_record`.
+    ///
+    /// # Arguments
+    /// * `record_content` - The column values to store
+    ///
+    /// # Returns
+    /// The auto-assigned record ID.
+    ///
+    /// # Errors
+    /// * `SchemaViolation` - Record doesn't match table schema
+    /// * `RecordTooLarge` - Record can't fit in any single page
+    pub fn insert(&mut self, record_content: PageRecordContent) -> Result<u64, DatabaseError> {
+        let record_id = self.header.advance_next_record_id();
+        self.insert_record(record_id, record_content)?;
+        self.save_header()?;
+        Ok(record_id)
     }
 
     /// Inserts a record into the table. Tries the last page first;
@@ -370,6 +390,72 @@ impl Table {
         }
 
         Err(DatabaseError::RecordNotFound(record_id))
+    }
+
+    /// Scans all records page-by-page, returning those that pass the filter.
+    /// Only one page is in memory at a time (streaming). Deleted records are
+    /// already excluded by `read_page`.
+    ///
+    /// # Arguments
+    /// * `filter` - Closure that receives `(record_id, &[ContentTypes])` and
+    ///   returns `true` to include the record in the result
+    ///
+    /// # Returns
+    /// A Vec of `(record_id, PageRecordContent)` for all matching records.
+    pub fn scan_records<F>(&self, filter: F) -> Result<Vec<(u64, PageRecordContent)>, DatabaseError>
+    where
+        F: Fn(u64, &[ContentTypes]) -> bool,
+    {
+        let page_kbytes = self.header.get_page_kbytes();
+        let mut records: Vec<(u64, PageRecordContent)> = vec![];
+        for page_number in 0..self.header.get_pages_count() {
+            let resolved_filename = self.resolve_file(page_number)?;
+            let page = read_page(
+                resolved_filename.filename.as_str(),
+                resolved_filename.local_page_index,
+                page_kbytes,
+            )?;
+            for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
+                let record_content = page.get_record_content_by_slot_index(index);
+                if filter(record_metadata.get_id(), record_content.get_content()) {
+                    records.push((record_metadata.get_id(), record_content.clone()));
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    /// Scans all records page-by-page, returning IDs of those that pass the filter.
+    /// Like `scan_records` but only collects IDs — no content cloning.
+    /// Use with `delete_record` for two-phase delete (scan IDs, then delete each).
+    ///
+    /// # Arguments
+    /// * `filter` - Closure that receives `(record_id, &[ContentTypes])` and
+    ///   returns `true` to include the record ID in the result
+    ///
+    /// # Returns
+    /// A Vec of record IDs for all matching records.
+    pub fn scan_record_ids<F>(&self, filter: F) -> Result<Vec<u64>, DatabaseError>
+    where
+        F: Fn(u64, &[ContentTypes]) -> bool,
+    {
+        let page_kbytes = self.header.get_page_kbytes();
+        let mut ids: Vec<u64> = vec![];
+        for page_number in 0..self.header.get_pages_count() {
+            let resolved_filename = self.resolve_file(page_number)?;
+            let page = read_page(
+                resolved_filename.filename.as_str(),
+                resolved_filename.local_page_index,
+                page_kbytes,
+            )?;
+            for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
+                let record_content = page.get_record_content_by_slot_index(index);
+                if filter(record_metadata.get_id(), record_content.get_content()) {
+                    ids.push(record_metadata.get_id());
+                }
+            }
+        }
+        Ok(ids)
     }
 
     /// Deletes a record by ID via index lookup.
@@ -551,14 +637,18 @@ impl Table {
         Ok(pages_freed)
     }
 
-    /// Returns the fraction of total page space wasted by fragmentation and sparse pages.
+    /// Returns the fraction of total page space wasted by fragmentation and unused allocations.
     /// 0.0 = perfectly packed, 1.0 = all space wasted.
     /// Scans all page headers (20 bytes each, no record data read).
     ///
     /// # Formula
-    /// `wasted = sum(free_space + fragmented_space)` across all pages
+    /// `wasted = sum(fragmented_space) across all pages + sum(free_space) across non-last pages`
     /// `capacity = sum(page_size - HEADER_SIZE)` across all pages
     /// `ratio = wasted / capacity`
+    ///
+    /// The last page's `free_space` is excluded because `insert_record` appends to the last page,
+    /// so that free space is growth room — not waste. Non-last pages' `free_space` is counted
+    /// as wasted since new inserts never target them.
     pub fn fragmentation_ratio(&self) -> Result<f64, DatabaseError> {
         let page_kbytes = self.header.get_page_kbytes();
         let page_size = page_kbytes as usize * KBYTES;
@@ -573,7 +663,10 @@ impl Table {
                 resolved_filename.local_page_index,
                 page_kbytes,
             )?;
-            wasted += header.get_free_space() as u64 + header.get_fragment_space() as u64;
+            wasted += header.get_fragment_space() as u64;
+            if page_num < total_pages - 1 {
+                wasted += header.get_free_space() as u64;
+            }
         }
 
         let ratio = wasted as f64 / (total_pages * page_capacity) as f64;
@@ -623,6 +716,7 @@ mod tests {
                 pages_count,
                 1,
                 8,
+                0,
                 vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
             ),
             HashIndex::new(16),
