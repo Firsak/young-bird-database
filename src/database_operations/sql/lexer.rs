@@ -22,20 +22,25 @@ impl Lexer {
         }
     }
 
+    /// Returns the character at the current position without advancing.
     fn peek(&self) -> Option<char> {
         self.input.get(self.position).copied()
     }
 
+    /// Returns the character at the current position and advances by one.
     fn advance(&mut self) -> Option<char> {
         let value = self.input.get(self.position).copied();
         self.position += 1;
         value
     }
 
+    /// Returns the character one position ahead without advancing (lookahead).
+    /// Used for two-character operators like `<=`, `>=`, `!=`, `<>`.
     fn peek_next(&self) -> Option<char> {
         self.input.get(self.position + 1).copied()
     }
 
+    /// Advances past all whitespace characters at the current position.
     fn skip_whitespace(&mut self) {
         while match self.peek() {
             Some(x) => x.is_whitespace(),
@@ -45,6 +50,19 @@ impl Lexer {
         }
     }
 
+    /// Tokenizes the full input string into a `Vec<Token>`.
+    ///
+    /// Consumes characters left-to-right, dispatching to specialized readers
+    /// based on the first character: alphabetic → `read_identifier_or_keyword`,
+    /// digit → `read_number`, `'` → `read_string`, operators handled inline.
+    /// Whitespace between tokens is skipped automatically.
+    ///
+    /// # Returns
+    /// The complete token stream for the input.
+    ///
+    /// # Errors
+    /// Returns `String` on unexpected characters, unterminated strings,
+    /// or unparseable numbers.
     pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
         let mut tokens: Vec<Token> = vec![];
         let mut char_value = self.peek();
@@ -136,6 +154,11 @@ impl Lexer {
         Ok(tokens)
     }
 
+    /// Reads an identifier or keyword starting at the current position.
+    ///
+    /// Consumes alphanumeric characters and underscores. The collected string
+    /// is matched case-insensitively: `TRUE`/`FALSE` → `BooleanLiteral`,
+    /// SQL keywords (SELECT, FROM, etc.) → `Keyword`, otherwise → `Identifier`.
     fn read_identifier_or_keyword(&mut self) -> Token {
         let mut future_token: Vec<char> = vec![];
         while let Some(c) = self.peek() && (c.is_alphanumeric() || c == '_'){
@@ -157,6 +180,15 @@ impl Lexer {
         }
     }
 
+    /// Reads a numeric literal (integer or float) starting at the current position.
+    ///
+    /// Collects digits first. If a `.` followed by a digit is found, collects
+    /// the fractional part and returns `FloatLiteral`. Otherwise returns
+    /// `IntegerLiteral`. A trailing `.` without a digit (e.g., `"3."`) leaves
+    /// the dot unconsumed.
+    ///
+    /// # Errors
+    /// Returns `String` if the collected characters can't be parsed as u64 or f64.
     fn read_number(&mut self) -> Result<Token, String> {
         let mut future_token: Vec<char> = vec![];
         // Current problem: the single loop collects digits AND dots together.
@@ -207,6 +239,14 @@ impl Lexer {
         ))
     }
 
+    /// Reads a string literal enclosed in single quotes.
+    ///
+    /// Starts after the opening `'`. Escaped quotes use SQL convention:
+    /// `''` inside a string produces a single `'` character (e.g., `'it''s'` → `it's`).
+    /// Consumes the closing `'`.
+    ///
+    /// # Errors
+    /// Returns `String` if the input ends before a closing `'` is found.
     fn read_string(&mut self) -> Result<Token, String> {
         let mut future_token: Vec<char> = vec![];
         loop {

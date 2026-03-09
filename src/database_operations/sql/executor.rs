@@ -88,10 +88,15 @@ impl Executor {
         }
     }
 
-    // ── CREATE TABLE ─────────────────────────────────────────────
-    // SQL: CREATE TABLE t (name TEXT, age INT32 NOT NULL)
-    // → convert Vec<ast::ColumnSpec> to Vec<ColumnDef>, call Table::create
-
+    /// Executes a CREATE TABLE statement.
+    ///
+    /// SQL: `CREATE TABLE t (name TEXT, age INT32 NOT NULL)`
+    ///
+    /// Converts `Vec<ast::ColumnSpec>` → `Vec<ColumnDef>`, then calls `Table::create`
+    /// to write the `.meta` and initial `.dat` files.
+    ///
+    /// # Returns
+    /// `ExecuteResult::Created` on success.
     fn execute_create_table(
         &self,
         table_name: &str,
@@ -116,10 +121,15 @@ impl Executor {
         Ok(ExecuteResult::Created)
     }
 
-    // ── DROP TABLE ───────────────────────────────────────────────
-    // SQL: DROP TABLE t
-    // → delete .meta, .idx, and all _N.dat files
-
+    /// Executes a DROP TABLE statement.
+    ///
+    /// SQL: `DROP TABLE t`
+    ///
+    /// Deletes `.meta`, `.idx`, and all `_N.dat` files. Silently ignores
+    /// files that are already missing (NotFound).
+    ///
+    /// # Returns
+    /// `ExecuteResult::Dropped` on success.
     fn execute_drop_table(&self, table_name: &str) -> Result<ExecuteResult, DatabaseError> {
         let meta = format!("{}/{}.meta", self.base_path, table_name);
         let idx = format!("{}/{}.idx", self.base_path, table_name);
@@ -145,10 +155,20 @@ impl Executor {
         Ok(ExecuteResult::Dropped)
     }
 
-    // ── INSERT ───────────────────────────────────────────────────
-    // SQL: INSERT INTO t VALUES (1, 'alice', true)
-    // → open table, convert literals to ContentTypes using schema, call table.insert()
-
+    /// Executes an INSERT statement.
+    ///
+    /// SQL: `INSERT INTO t VALUES (1, 'alice', true)`
+    ///
+    /// Opens the table, validates value count against schema, converts each
+    /// `Literal` → `ContentTypes` using the column's declared type, then calls
+    /// `table.insert()` which auto-assigns a record ID.
+    ///
+    /// # Returns
+    /// `ExecuteResult::Inserted { id }` with the auto-assigned record ID.
+    ///
+    /// # Errors
+    /// `SchemaViolation` if value count doesn't match column count, or if a
+    /// literal can't be converted to the target column type.
     fn execute_insert(
         &self,
         table_name: &str,
@@ -177,10 +197,21 @@ impl Executor {
         Ok(ExecuteResult::Inserted { id })
     }
 
-    // ── SELECT ───────────────────────────────────────────────────
-    // SQL: SELECT * FROM t WHERE age > 18
-    // → open table, scan with WHERE filter, project columns, prepend id
-
+    /// Executes a SELECT statement.
+    ///
+    /// SQL: `SELECT * FROM t WHERE age > 18` or `SELECT name, id FROM t`
+    ///
+    /// Opens the table, validates column names against schema, scans records
+    /// with the WHERE filter, and projects the requested columns. The `id`
+    /// column (auto-increment record ID) is always available as a virtual column.
+    /// For `SELECT *`, columns are returned as `[id, col1, col2, ...]`.
+    /// For named columns, pre-computes column indices before iterating rows.
+    ///
+    /// # Returns
+    /// `ExecuteResult::Selected { columns, rows }` with column names and matching rows.
+    ///
+    /// # Errors
+    /// `SchemaViolation` if a named column doesn't exist in the table schema.
     fn execute_select(
         &self,
         table_name: &str,
@@ -265,10 +296,16 @@ impl Executor {
         })
     }
 
-    // ── DELETE ───────────────────────────────────────────────────
-    // SQL: DELETE FROM t WHERE id = 3
-    // → open table, scan with WHERE filter, delete each match
-
+    /// Executes a DELETE statement using two-phase approach.
+    ///
+    /// SQL: `DELETE FROM t WHERE id = 3` or `DELETE FROM t` (deletes all)
+    ///
+    /// Phase 1: scans record IDs matching the WHERE filter via `scan_record_ids`
+    /// (collects only IDs, no content cloning).
+    /// Phase 2: deletes each matched record by ID via `delete_record`.
+    ///
+    /// # Returns
+    /// `ExecuteResult::Deleted { count }` with the number of records deleted.
     fn execute_delete(
         &self,
         table_name: &str,
@@ -295,10 +332,22 @@ impl Executor {
         })
     }
 
-    // ── UPDATE ───────────────────────────────────────────────────
-    // SQL: UPDATE t SET name = 'bob' WHERE id = 1
-    // → open table, scan with WHERE filter, apply assignments, update each match
-
+    /// Executes an UPDATE statement using two-phase approach.
+    ///
+    /// SQL: `UPDATE t SET name = 'bob' WHERE id = 1` or `UPDATE t SET age = 30`
+    ///
+    /// Pre-computes column positions and converts literal values before scanning.
+    /// Phase 1: scans record IDs matching the WHERE filter via `scan_record_ids`.
+    /// Phase 2: for each matched record, reads current content, applies the
+    /// pre-converted assignment values at pre-computed positions, then calls
+    /// `update_record`.
+    ///
+    /// # Returns
+    /// `ExecuteResult::Updated { count }` with the number of records updated.
+    ///
+    /// # Errors
+    /// `SchemaViolation` if an assignment column doesn't exist or the literal
+    /// can't be converted to the column's type.
     fn execute_update(
         &self,
         table_name: &str,
@@ -779,6 +828,11 @@ fn literal_to_content_type(
     }
 }
 
+/// Converts a `ContentTypes` value to its display string.
+///
+/// Used by `pretty_result_print` to render cell values in SELECT output.
+/// Null → `"NULL"`, Boolean → `"true"`/`"false"`, numeric types → decimal string,
+/// Text → the raw string value.
 fn content_type_string(value: &ContentTypes) -> String {
     match value {
         ContentTypes::Null => "NULL".to_string(),
@@ -803,6 +857,17 @@ fn content_type_string(value: &ContentTypes) -> String {
     }
 }
 
+/// Formats an `ExecuteResult` as a human-readable string for REPL/CLI output.
+///
+/// - Non-SELECT results: single-line status message (e.g., `"Table created"`,
+///   `"Inserted record id=5"`, `"Deleted 3 record(s)"`)
+/// - SELECT results: psql-style column-aligned table with header, separator,
+///   data rows, and row count footer
+///
+/// # Arguments
+/// - `result`: the execution result to format
+/// - `max_width`: optional column width limit; values exceeding this are truncated
+///   (with `...` suffix when `width >= 4`). `None` means unlimited width.
 pub fn pretty_result_print(result: ExecuteResult, max_width: Option<usize>) -> String {
     match result {
         ExecuteResult::Created => "Table created".to_string(),
