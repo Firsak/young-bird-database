@@ -10,7 +10,7 @@
 
 use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::page::record::PageRecordContent;
-use crate::database_operations::file_processing::table::{column_def, ColumnDef, Table};
+use crate::database_operations::file_processing::table::{ColumnDef, Table};
 use crate::database_operations::file_processing::types::{
     self as storage_types, ColumnTypes, ContentTypes,
 };
@@ -497,7 +497,7 @@ fn compare_content_with_literal(
             Ok(apply_op((*v as i64).cmp(&-(*lit as i64)), op))
         }
         (ContentTypes::Int64(v), Literal::NegativeInteger(lit)) => {
-            Ok(apply_op((*v as i64).cmp(&-(*lit as i64)), op))
+            Ok(apply_op((*v).cmp(&-(*lit as i64)), op))
         }
 
         // Unsigned integers vs Integer literal
@@ -776,5 +776,279 @@ fn literal_to_content_type(
             "cannot convert {:?} to {}",
             literal, target
         ))),
+    }
+}
+
+fn content_type_string(value: &ContentTypes) -> String {
+    match value {
+        ContentTypes::Null => "NULL".to_string(),
+        ContentTypes::Boolean(v) => {
+            if *v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        ContentTypes::Text(v) => v.clone(),
+        ContentTypes::Int8(v) => v.to_string(),
+        ContentTypes::Int16(v) => v.to_string(),
+        ContentTypes::Int32(v) => v.to_string(),
+        ContentTypes::Int64(v) => v.to_string(),
+        ContentTypes::UInt8(v) => v.to_string(),
+        ContentTypes::UInt16(v) => v.to_string(),
+        ContentTypes::UInt32(v) => v.to_string(),
+        ContentTypes::UInt64(v) => v.to_string(),
+        ContentTypes::Float32(v) => v.to_string(),
+        ContentTypes::Float64(v) => v.to_string(),
+    }
+}
+
+pub fn pretty_result_print(result: ExecuteResult, max_width: Option<usize>) -> String {
+    match result {
+        ExecuteResult::Created => "Table created".to_string(),
+        ExecuteResult::Dropped => "Table dropped".to_string(),
+        ExecuteResult::Inserted { id } => format!("Inserted record id={}", id),
+        ExecuteResult::Deleted { count } => format!("Deleted {} record(s)", count),
+        ExecuteResult::Updated { count } => format!("Updated {} record(s)", count),
+        ExecuteResult::Selected { columns, rows } => {
+            let max_width = max_width.unwrap_or(usize::MAX);
+            let mut columns_width: Vec<usize> = vec![0; columns.len()];
+            // let row_height: Vec<usize> = vec![0; rows.len()];
+            for (index, col) in columns.iter().enumerate() {
+                let mut col_width = col.len();
+                if col_width > max_width {
+                    col_width = max_width;
+                }
+                columns_width[index] = col_width;
+            }
+
+            for row in rows.iter() {
+                for (index, col) in row.iter().enumerate() {
+                    let mut col_width = content_type_string(col).len();
+                    if col_width > max_width {
+                        col_width = max_width;
+                    }
+                    if col_width > columns_width[index] {
+                        columns_width[index] = col_width;
+                    }
+                }
+            }
+
+            let mut lines_list: Vec<String> = Vec::with_capacity(3 + rows.len());
+            let header_line = columns
+                .iter()
+                .zip(columns_width.iter())
+                .map(|(col, size)| {
+                    format!(
+                        " {:<size$} ",
+                        if col.len() > *size && *size >= 4 {
+                            &col[..size - 3].to_string()
+                        } else {
+                            col
+                        }
+                    )
+                })
+                .collect::<Vec<String>>()
+                .join("|");
+
+            lines_list.push(header_line);
+
+            let separation_line = columns_width
+                .iter()
+                .map(|width| "-".repeat(*width + 2))
+                .collect::<Vec<String>>()
+                .join("+");
+            lines_list.push(separation_line);
+
+            for row in &rows {
+                let row_line = row
+                    .iter()
+                    .map(content_type_string)
+                    .zip(columns_width.iter())
+                    .map(|(st, size)| {
+                        format!(
+                            " {:<size$} ",
+                            if st.len() > *size && *size >= 4 {
+                                st[..size - 3].to_string()
+                            } else {
+                                st
+                            }
+                        )
+                    })
+                    .collect::<Vec<String>>()
+                    .join("|");
+
+                lines_list.push(row_line);
+            }
+
+            lines_list.push(format!("{} row(s) returned.", rows.len()));
+
+            lines_list.join("\n")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── content_type_string tests ────────────────────────────────
+
+    #[test]
+    fn content_string_null() {
+        assert_eq!(content_type_string(&ContentTypes::Null), "NULL");
+    }
+
+    #[test]
+    fn content_string_boolean() {
+        assert_eq!(content_type_string(&ContentTypes::Boolean(true)), "true");
+        assert_eq!(content_type_string(&ContentTypes::Boolean(false)), "false");
+    }
+
+    #[test]
+    fn content_string_text() {
+        assert_eq!(
+            content_type_string(&ContentTypes::Text("hello".to_string())),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn content_string_integers() {
+        assert_eq!(content_type_string(&ContentTypes::Int8(-42)), "-42");
+        assert_eq!(content_type_string(&ContentTypes::Int64(123456)), "123456");
+        assert_eq!(content_type_string(&ContentTypes::UInt64(999)), "999");
+    }
+
+    #[test]
+    fn content_string_floats() {
+        assert_eq!(content_type_string(&ContentTypes::Float32(3.14)), "3.14");
+        assert_eq!(content_type_string(&ContentTypes::Float64(2.718)), "2.718");
+    }
+
+    // ── apply_op tests ───────────────────────────────────────────
+
+    #[test]
+    fn apply_op_eq() {
+        assert!(apply_op(std::cmp::Ordering::Equal, &CompOp::Eq));
+        assert!(!apply_op(std::cmp::Ordering::Less, &CompOp::Eq));
+        assert!(!apply_op(std::cmp::Ordering::Greater, &CompOp::Eq));
+    }
+
+    #[test]
+    fn apply_op_ne() {
+        assert!(!apply_op(std::cmp::Ordering::Equal, &CompOp::Ne));
+        assert!(apply_op(std::cmp::Ordering::Less, &CompOp::Ne));
+        assert!(apply_op(std::cmp::Ordering::Greater, &CompOp::Ne));
+    }
+
+    #[test]
+    fn apply_op_lt_gt_le_ge() {
+        assert!(apply_op(std::cmp::Ordering::Less, &CompOp::Lt));
+        assert!(!apply_op(std::cmp::Ordering::Equal, &CompOp::Lt));
+
+        assert!(apply_op(std::cmp::Ordering::Greater, &CompOp::Gt));
+        assert!(!apply_op(std::cmp::Ordering::Equal, &CompOp::Gt));
+
+        assert!(apply_op(std::cmp::Ordering::Less, &CompOp::Le));
+        assert!(apply_op(std::cmp::Ordering::Equal, &CompOp::Le));
+        assert!(!apply_op(std::cmp::Ordering::Greater, &CompOp::Le));
+
+        assert!(apply_op(std::cmp::Ordering::Greater, &CompOp::Ge));
+        assert!(apply_op(std::cmp::Ordering::Equal, &CompOp::Ge));
+        assert!(!apply_op(std::cmp::Ordering::Less, &CompOp::Ge));
+    }
+
+    // ── pretty_result_print tests ────────────────────────────────
+
+    #[test]
+    fn pretty_print_simple_variants() {
+        assert_eq!(pretty_result_print(ExecuteResult::Created, None), "Table created");
+        assert_eq!(pretty_result_print(ExecuteResult::Dropped, None), "Table dropped");
+        assert_eq!(
+            pretty_result_print(ExecuteResult::Inserted { id: 5 }, None),
+            "Inserted record id=5"
+        );
+        assert_eq!(
+            pretty_result_print(ExecuteResult::Deleted { count: 3 }, None),
+            "Deleted 3 record(s)"
+        );
+        assert_eq!(
+            pretty_result_print(ExecuteResult::Updated { count: 0 }, None),
+            "Updated 0 record(s)"
+        );
+    }
+
+    #[test]
+    fn pretty_print_select_empty() {
+        let result = ExecuteResult::Selected {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![],
+        };
+        let output = pretty_result_print(result, None);
+        assert!(output.contains("id"));
+        assert!(output.contains("name"));
+        assert!(output.contains("0 row(s) returned."));
+    }
+
+    #[test]
+    fn pretty_print_select_with_rows() {
+        let result = ExecuteResult::Selected {
+            columns: vec!["id".to_string(), "age".to_string()],
+            rows: vec![
+                vec![ContentTypes::UInt64(0), ContentTypes::Int64(25)],
+                vec![ContentTypes::UInt64(1), ContentTypes::Int64(30)],
+            ],
+        };
+        let output = pretty_result_print(result, None);
+        assert!(output.contains("id"));
+        assert!(output.contains("age"));
+        assert!(output.contains("25"));
+        assert!(output.contains("30"));
+        assert!(output.contains("2 row(s) returned."));
+    }
+
+    #[test]
+    fn pretty_print_select_separator() {
+        let result = ExecuteResult::Selected {
+            columns: vec!["id".to_string()],
+            rows: vec![],
+        };
+        let output = pretty_result_print(result, None);
+        let lines: Vec<&str> = output.lines().collect();
+        // Second line should be the separator
+        assert!(lines[1].contains("---"));
+    }
+
+    // ── column_type_to_storage tests ─────────────────────────────
+
+    #[test]
+    fn column_type_conversion_all_types() {
+        assert_eq!(column_type_to_storage(&ast::ColumnType::Boolean), storage_types::ColumnTypes::Boolean);
+        assert_eq!(column_type_to_storage(&ast::ColumnType::Text), storage_types::ColumnTypes::Text);
+        assert_eq!(column_type_to_storage(&ast::ColumnType::Int8), storage_types::ColumnTypes::Int8);
+        assert_eq!(column_type_to_storage(&ast::ColumnType::Int64), storage_types::ColumnTypes::Int64);
+        assert_eq!(column_type_to_storage(&ast::ColumnType::UInt64), storage_types::ColumnTypes::UInt64);
+        assert_eq!(column_type_to_storage(&ast::ColumnType::Float64), storage_types::ColumnTypes::Float64);
+    }
+
+    // ── literal_to_content_type tests ────────────────────────────
+
+    #[test]
+    fn literal_null_converts_to_null() {
+        let result = literal_to_content_type(&Literal::Null, &ColumnTypes::Int64).unwrap();
+        assert_eq!(result, ContentTypes::Null);
+    }
+
+    #[test]
+    fn literal_integer_overflow_rejected() {
+        let result = literal_to_content_type(&Literal::Integer(200), &ColumnTypes::Int8);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn literal_type_mismatch_rejected() {
+        let result = literal_to_content_type(&Literal::Str("hello".to_string()), &ColumnTypes::Int64);
+        assert!(result.is_err());
     }
 }
