@@ -5,7 +5,7 @@
 // Input:  Statement (parsed AST node)
 // Output: ExecuteResult (Created, Dropped, Inserted, Deleted, Updated, Selected)
 //
-// The executor owns configuration (base_path, pages_per_file, page_kbytes)
+// The executor owns configuration (base_path, pages_per_file, page_kbytes, overflow_kbytes)
 // and opens/creates tables as needed per statement.
 
 use crate::database_operations::file_processing::errors::DatabaseError;
@@ -44,14 +44,16 @@ pub struct Executor {
     base_path: String,
     pages_per_file: u32,
     page_kbytes: u32,
+    overflow_kbytes: u32,
 }
 
 impl Executor {
-    pub fn new(base_path: String, pages_per_file: u32, page_kbytes: u32) -> Self {
+    pub fn new(base_path: String, pages_per_file: u32, page_kbytes: u32, overflow_kbytes: u32) -> Self {
         Self {
             base_path,
             pages_per_file,
             page_kbytes,
+            overflow_kbytes,
         }
     }
 
@@ -116,6 +118,7 @@ impl Executor {
             self.base_path.clone(),
             self.pages_per_file,
             self.page_kbytes,
+            self.overflow_kbytes,
             table_columns,
         )?;
         Ok(ExecuteResult::Created)
@@ -177,7 +180,6 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
-            self.pages_per_file,
         )?;
         if values.len() != table.get_header().get_columns_count() as usize {
             return Err(DatabaseError::SchemaViolation(
@@ -221,7 +223,6 @@ impl Executor {
         let table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
-            self.pages_per_file,
         )?;
 
         // TODO: validate WHERE column names against schema before scanning
@@ -314,7 +315,6 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
-            self.pages_per_file,
         )?;
         // TODO: validate WHERE column names against schema before scanning
         let ids_to_delete = {
@@ -357,7 +357,6 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
-            self.pages_per_file,
         )?;
 
         // TODO: validate WHERE column names against schema before scanning

@@ -58,7 +58,7 @@ fn insert_record(executor: &Executor, table_name: &str, age: u64, name: &str) ->
 #[test]
 fn create_table_basic() {
     let dir = temp_dir("create_basic");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     let result = executor
         .execute(Statement::CreateTable {
             table: "items".to_string(),
@@ -97,7 +97,7 @@ fn create_table_basic() {
 #[test]
 fn create_table_duplicate_name() {
     let dir = temp_dir("create_dup");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     // Creating same table again should fail (files already exist)
@@ -125,7 +125,7 @@ fn create_table_duplicate_name() {
 #[test]
 fn drop_table_basic() {
     let dir = temp_dir("drop_basic");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
     insert_record(&executor, "users", 25, "alice");
 
@@ -154,7 +154,7 @@ fn drop_table_basic() {
 #[test]
 fn drop_nonexistent_table() {
     let dir = temp_dir("drop_nonexist");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
 
     // Dropping a table that doesn't exist should succeed (files just don't exist)
     let result = executor
@@ -174,7 +174,7 @@ fn drop_nonexistent_table() {
 #[test]
 fn drop_and_recreate() {
     let dir = temp_dir("drop_recreate");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
     insert_record(&executor, "users", 25, "alice");
 
@@ -214,7 +214,7 @@ fn drop_and_recreate() {
 #[test]
 fn insert_returns_incrementing_ids() {
     let dir = temp_dir("insert_ids");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     let id0 = insert_record(&executor, "users", 25, "alice");
@@ -231,7 +231,7 @@ fn insert_returns_incrementing_ids() {
 #[test]
 fn insert_wrong_value_count() {
     let dir = temp_dir("insert_bad_count");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     // Table has 2 columns (age, name), but we provide 1 value
@@ -248,7 +248,7 @@ fn insert_wrong_value_count() {
 #[test]
 fn insert_type_mismatch() {
     let dir = temp_dir("insert_bad_type");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     // age is Int64 but we pass a string, name is Text but we pass an integer
@@ -265,7 +265,7 @@ fn insert_type_mismatch() {
 #[test]
 fn insert_and_verify_via_select() {
     let dir = temp_dir("insert_verify");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -299,7 +299,7 @@ fn insert_and_verify_via_select() {
 #[test]
 fn select_all_no_where() {
     let dir = temp_dir("select_all_no_where");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -334,7 +334,7 @@ fn select_all_no_where() {
 #[test]
 fn select_all_with_where() {
     let dir = temp_dir("select_all_where");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -369,7 +369,7 @@ fn select_all_with_where() {
 #[test]
 fn select_named_columns() {
     let dir = temp_dir("select_named");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -398,7 +398,7 @@ fn select_named_columns() {
 #[test]
 fn select_named_with_id() {
     let dir = temp_dir("select_named_id");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -428,7 +428,7 @@ fn select_named_with_id() {
 #[test]
 fn select_nonexistent_column_rejected() {
     let dir = temp_dir("select_bad_col");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     let result = executor.execute(Statement::Select {
@@ -445,7 +445,7 @@ fn select_nonexistent_column_rejected() {
 #[test]
 fn select_empty_table() {
     let dir = temp_dir("select_empty");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     let result = executor
@@ -470,7 +470,7 @@ fn select_empty_table() {
 #[test]
 fn select_where_by_id() {
     let dir = temp_dir("select_by_id");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -508,7 +508,7 @@ fn select_where_by_id() {
 #[test]
 fn delete_all_records() {
     let dir = temp_dir("delete_all");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -545,7 +545,7 @@ fn delete_all_records() {
 #[test]
 fn delete_with_where() {
     let dir = temp_dir("delete_where");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -594,7 +594,7 @@ fn delete_with_where() {
 #[test]
 fn update_all_records() {
     let dir = temp_dir("update_all");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -637,7 +637,7 @@ fn update_all_records() {
 #[test]
 fn update_with_where() {
     let dir = temp_dir("update_where");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -686,7 +686,7 @@ fn update_with_where() {
 #[test]
 fn update_multiple_columns() {
     let dir = temp_dir("update_multi_col");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -734,7 +734,7 @@ fn update_multiple_columns() {
 #[test]
 fn update_none_matching() {
     let dir = temp_dir("update_none");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -779,7 +779,7 @@ fn update_none_matching() {
 #[test]
 fn update_nonexistent_column_rejected() {
     let dir = temp_dir("update_bad_col");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");
@@ -801,7 +801,7 @@ fn update_nonexistent_column_rejected() {
 #[test]
 fn update_by_id() {
     let dir = temp_dir("update_by_id");
-    let executor = Executor::new(dir.clone(), 100, 8);
+    let executor = Executor::new(dir.clone(), 100, 8, 1024);
     create_test_table(&executor, "users");
 
     insert_record(&executor, "users", 25, "alice");

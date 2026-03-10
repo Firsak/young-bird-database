@@ -13,6 +13,7 @@ fn main() {
     let mut base_path = "data";
     let pages_per_file = 1000;
     let page_kbytes = 8;
+    let overflow_kbytes = 1024;
 
     let interactive_mode = args.len() == 1;
 
@@ -78,7 +79,7 @@ fn main() {
 
     std::fs::create_dir_all(base_path).unwrap();
 
-    let executor = Executor::new(base_path.to_string(), pages_per_file, page_kbytes);
+    let executor = Executor::new(base_path.to_string(), pages_per_file, page_kbytes, overflow_kbytes);
 
     if interactive_mode {
         loop {

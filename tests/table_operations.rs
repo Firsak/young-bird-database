@@ -34,10 +34,12 @@ fn write_and_read_table_header() {
     let filename = &temp_meta("write_and_read_table_header");
 
     let header = TableHeader::new(
-        10, // pages_count
-        3,  // columns_count
-        8,  // page_kbytes
-        0,  // next_record_id
+        10,   // pages_count
+        3,    // columns_count
+        8,    // page_kbytes
+        0,    // next_record_id
+        1000, // pages_per_file
+        1024, // overflow_kbytes
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -59,7 +61,7 @@ fn write_and_read_table_header() {
 fn write_and_read_empty_table_header() {
     let filename = &temp_meta("write_and_read_empty_table_header");
 
-    let header = TableHeader::new(0, 0, 8, 0, vec![]);
+    let header = TableHeader::new(0, 0, 8, 0, 1000, 1024, vec![]);
 
     table::writing::write_table_header(filename, &header).expect("Failed to write table header");
 
@@ -81,6 +83,8 @@ fn overwrite_table_header() {
         2,
         8,
         0,
+        1000,
+        1024,
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -94,6 +98,8 @@ fn overwrite_table_header() {
         1,
         16,
         0,
+        1000,
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
     table::writing::write_table_header(filename, &header_v2).expect("Failed to write v2");
@@ -120,6 +126,7 @@ fn create_table_produces_files() {
         dir.clone(),
         100,
         8,
+        1024,
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -142,6 +149,7 @@ fn create_table_invalid_pages_per_file() {
         dir.clone(),
         0,
         8,
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
 
@@ -158,6 +166,7 @@ fn create_and_open_table() {
         dir.clone(),
         50,
         8,
+        1024,
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -166,7 +175,7 @@ fn create_and_open_table() {
     .expect("Can not create table");
 
     let table_read =
-        Table::open("products".to_string(), dir.clone(), 50).expect("Can not read table");
+        Table::open("products".to_string(), dir.clone()).expect("Can not read table");
 
     assert_eq!(
         table.get_header().get_pages_count(),
@@ -187,7 +196,7 @@ fn create_and_open_table() {
 
 #[test]
 fn open_nonexistent_table() {
-    let result = Table::open("ghost".to_string(), "/tmp/no_such_dir".to_string(), 100);
+    let result = Table::open("ghost".to_string(), "/tmp/no_such_dir".to_string());
     assert!(result.is_err());
 }
 
@@ -201,8 +210,9 @@ fn create_test_table(test_name: &str) -> (Table, String) {
     let table = Table::create(
         "items".to_string(),
         dir.clone(),
-        5, // pages_per_file = 5 (small, to test multi-file)
-        8, // page_kbytes = 8
+        5,    // pages_per_file = 5 (small, to test multi-file)
+        8,    // page_kbytes = 8
+        1024, // overflow_kbytes
         vec![
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
@@ -286,7 +296,7 @@ fn insert_and_reopen_table() {
         .expect("Failed to insert record");
 
     // Reopen the table from disk
-    let reopened = Table::open("items".to_string(), dir.clone(), 5)
+    let reopened = Table::open("items".to_string(), dir.clone())
         .expect("Failed to reopen table");
 
     // The reopened table should see the same pages_count
@@ -320,7 +330,7 @@ fn insert_new_page_and_reopen() {
     assert!(pages_before > 1, "Should have created multiple pages");
 
     // Reopen and verify pages_count persisted
-    let reopened = Table::open("items".to_string(), dir.clone(), 5)
+    let reopened = Table::open("items".to_string(), dir.clone())
         .expect("Failed to reopen table");
 
     assert_eq!(
@@ -714,6 +724,7 @@ fn create_with_zero_page_kbytes_rejected() {
         dir.clone(),
         10,
         0, // zero page_kbytes
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
     assert!(result.is_err(), "Should reject page_kbytes of 0");
@@ -728,6 +739,7 @@ fn create_with_empty_columns_rejected() {
         dir.clone(),
         10,
         8,
+        1024,
         vec![], // no columns
     );
     assert!(result.is_err(), "Should reject empty column list");
@@ -742,6 +754,7 @@ fn create_with_empty_table_name_rejected() {
         dir.clone(),
         10,
         8,
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
     assert!(result.is_err(), "Should reject empty table name");
@@ -756,6 +769,7 @@ fn create_with_whitespace_table_name_rejected() {
         dir.clone(),
         10,
         8,
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
     );
     assert!(result.is_err(), "Should reject whitespace-only table name");
@@ -770,6 +784,7 @@ fn create_with_empty_column_name_rejected() {
         dir.clone(),
         10,
         8,
+        1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "".to_string())],
     );
     assert!(result.is_err(), "Should reject empty column name");
@@ -777,21 +792,10 @@ fn create_with_empty_column_name_rejected() {
 }
 
 #[test]
-fn open_with_zero_pages_per_file_rejected() {
-    let result = Table::open(
-        "test".to_string(),
-        "/tmp".to_string(),
-        0, // zero pages_per_file
-    );
-    assert!(result.is_err(), "Should reject pages_per_file of 0");
-}
-
-#[test]
 fn open_with_empty_name_rejected() {
     let result = Table::open(
         "".to_string(),
         "/tmp".to_string(),
-        10,
     );
     assert!(result.is_err(), "Should reject empty table name on open");
 }
@@ -1031,7 +1035,7 @@ fn compact_table_reopen_after_compact() {
     table.compact_table().expect("compact failed");
 
     // Reopen the table from disk
-    let reopened = Table::open("items".to_string(), dir.clone(), 5)
+    let reopened = Table::open("items".to_string(), dir.clone())
         .expect("Failed to reopen after compact");
 
     // Records 5 and 6 should be readable from reopened table
@@ -1116,7 +1120,7 @@ fn insert_auto_increment_persists_across_reopen() {
     table.insert(make_record(2, "second")).expect("insert failed");
 
     // Reopen the table from disk
-    let mut reopened = Table::open("items".to_string(), dir.clone(), 5)
+    let mut reopened = Table::open("items".to_string(), dir.clone())
         .expect("reopen failed");
 
     let id = reopened

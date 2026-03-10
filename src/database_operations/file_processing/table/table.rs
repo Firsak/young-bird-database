@@ -29,7 +29,6 @@ use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECO
 pub struct Table {
     name: String,
     base_path: String,
-    pages_per_file: u32,
     header: TableHeader,
     index: HashIndex,
 }
@@ -46,14 +45,12 @@ impl Table {
     pub fn new(
         name: String,
         base_path: String,
-        pages_per_file: u32,
         header: TableHeader,
         index: HashIndex,
     ) -> Self {
         Self {
             name,
             base_path,
-            pages_per_file,
             header,
             index,
         }
@@ -93,24 +90,17 @@ impl Table {
     /// # Arguments
     /// * `name` - Table name (must not be empty)
     /// * `base_path` - Directory containing the table's files
-    /// * `pages_per_file` - Max pages per .dat file (runtime config, not persisted)
     ///
     /// # Errors
-    /// * `InvalidArgument` - Empty name or pages_per_file < 1
+    /// * `InvalidArgument` - Empty name
     /// * `Io` - .meta or .idx file doesn't exist or can't be read
     pub fn open(
         name: String,
         base_path: String,
-        pages_per_file: u32,
     ) -> Result<Self, DatabaseError> {
         if name.trim().is_empty() {
             return Err(DatabaseError::InvalidArgument(
                 "Table name must not be empty".to_string(),
-            ));
-        }
-        if pages_per_file < 1 {
-            return Err(DatabaseError::InvalidArgument(
-                "Pages per file should be more than 0".to_string(),
             ));
         }
         let meta_path = format!("{}/{}.meta", base_path, name);
@@ -120,7 +110,6 @@ impl Table {
         Ok(Self {
             name,
             base_path,
-            pages_per_file,
             header,
             index,
         })
@@ -131,17 +120,19 @@ impl Table {
     /// # Arguments
     /// * `name` - Table name (must not be empty)
     /// * `base_path` - Directory where table files will be created
-    /// * `pages_per_file` - Max pages per .dat file (runtime config, not persisted)
+    /// * `pages_per_file` - Max pages per .dat file (must be >= 1)
     /// * `page_kbytes` - Page size in kilobytes (must be >= 1)
+    /// * `overflow_kbytes` - Max size of each .overflow file in kilobytes (must be >= 1)
     /// * `columns` - Column definitions for the table schema (must have at least one)
     ///
     /// # Errors
-    /// * `InvalidArgument` - Empty name, pages_per_file < 1, page_kbytes < 1, no columns, or empty column name
+    /// * `InvalidArgument` - Empty name, pages_per_file < 1, page_kbytes < 1, overflow_kbytes < 1, no columns, or empty column name
     pub fn create(
         name: String,
         base_path: String,
         pages_per_file: u32,
         page_kbytes: u32,
+        overflow_kbytes: u32,
         columns: Vec<super::column_def::ColumnDef>,
     ) -> Result<Self, DatabaseError> {
         if name.trim().is_empty() {
@@ -159,6 +150,11 @@ impl Table {
                 "Page size should be at least 1 KB".to_string(),
             ));
         }
+        if overflow_kbytes < 1 {
+            return Err(DatabaseError::InvalidArgument(
+                "Overflow file size should be at least 1 KB".to_string(),
+            ));
+        }
         if columns.is_empty() {
             return Err(DatabaseError::InvalidArgument(
                 "Table must have at least one column".to_string(),
@@ -172,9 +168,17 @@ impl Table {
             }
         }
         // TODO: reject duplicate column names
-        let table_header = TableHeader::new(1, columns.len() as u16, page_kbytes, 0, columns);
+        let table_header = TableHeader::new(
+            1,
+            columns.len() as u16,
+            page_kbytes,
+            0,
+            pages_per_file,
+            overflow_kbytes,
+            columns,
+        );
         let index = HashIndex::new(16);
-        let table = Table::new(name, base_path, pages_per_file, table_header, index);
+        let table = Table::new(name, base_path, table_header, index);
         table.save_header()?;
         write_new_page(&table.dat_path(0), 0, page_kbytes)?;
         table.save_index()?;
@@ -691,8 +695,9 @@ impl Table {
                 self.header.get_pages_count()
             )));
         }
-        let file_index = page_number / self.pages_per_file as u64;
-        let local_page_index = page_number % self.pages_per_file as u64;
+        let pages_per_file = self.header.get_pages_per_file() as u64;
+        let file_index = page_number / pages_per_file;
+        let local_page_index = page_number % pages_per_file;
         let filename = self.dat_path(file_index);
         Ok(ResolvedPage {
             filename,
@@ -711,12 +716,13 @@ mod tests {
         Table::new(
             "users".to_string(),
             "/data/db".to_string(),
-            pages_per_file,
             TableHeader::new(
                 pages_count,
                 1,
                 8,
                 0,
+                pages_per_file,
+                1024,
                 vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
             ),
             HashIndex::new(16),
