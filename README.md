@@ -7,6 +7,7 @@ A page-based database engine built from scratch in Rust with zero external depen
 - **Binary storage engine** with custom serialization for all data types (integers, floats, text, booleans, null)
 - **Slotted page layout** — metadata grows forward, content grows backward, with soft/hard delete and intra-page compaction
 - **Multi-file tables** — schema in `.meta`, pages in `_N.dat` files, hash index in `.idx`
+- **Overflow text** — large text values stored in separate `.overflow` files with fragmentation tracking and compaction
 - **Hash index** with open addressing and linear probing for O(1) record lookup by ID
 - **Inter-page compaction** — streaming two-page algorithm with O(page_size) memory
 - **Full SQL pipeline** — Lexer → Parser (recursive descent) → Executor with WHERE clause support (AND/OR/NOT with precedence)
@@ -65,7 +66,9 @@ Supported types: `BOOLEAN`, `TEXT`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, 
 ├── {table}.meta         ← Schema (columns, types, page config)
 ├── {table}_0.dat        ← Pages 0..999
 ├── {table}_1.dat        ← Pages 1000..1999
-└── {table}.idx          ← Hash index (record_id → page, slot)
+├── {table}.idx          ← Hash index (record_id → page, slot)
+├── {table}_0.overflow   ← Overflow text for large values
+└── {table}_1.overflow   ← More overflow files as needed
 ```
 
 Each page uses a **slotted page layout**:
@@ -108,6 +111,12 @@ src/
         table.rs         # Table struct (create, open, CRUD, scan, compact)
         reading.rs       # read_table_header (.meta file)
         writing.rs       # write_table_header (.meta file)
+      overflow/
+        overflow_header.rs # OverflowHeader (16 bytes)
+        overflow_ref.rs    # OverflowRef (16 bytes)
+        reverse_index.rs   # OverflowReverseIndex (in-memory)
+        reading.rs         # read_overflow_header, read_overflow_text
+        writing.rs         # create/append/rewrite overflow files
       index/
         index_header.rs  # IndexHeader (24 bytes)
         index_entry.rs   # IndexEntry (20 bytes)
@@ -122,8 +131,9 @@ src/
       executor.rs        # AST → Table API calls → results
 tests/
   page_operations.rs       # 17 page-level I/O tests
-  table_operations.rs      # 61 table-level operation tests
+  table_operations.rs      # 87 table-level operation tests
   index_operations.rs      # 4 index file I/O tests
+  overflow_operations.rs   # 13 overflow file I/O tests
   sql_lexer.rs             # 13 SQL lexer tests
   executor_operations.rs   # 24 SQL executor tests
   cli_operations.rs        # 8 CLI integration tests
@@ -131,7 +141,7 @@ tests/
 
 ## Test Coverage
 
-246 tests total (119 unit + 127 integration) covering serialization, page I/O, table CRUD, index operations, SQL parsing, query execution, and CLI behavior.
+298 tests total (132 unit + 166 integration) covering serialization, page I/O, table CRUD, overflow text, index operations, SQL parsing, query execution, and CLI behavior.
 
 ```bash
 cargo test
@@ -139,7 +149,7 @@ cargo test
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–5 and 7 are complete. Next up: B-Tree index (Phase 8) and advanced features (Phase 6).
+See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–5, 6.1, and 7 are complete. Next up: B-Tree index (Phase 8) or page caching (Phase 6.2).
 
 ## License
 

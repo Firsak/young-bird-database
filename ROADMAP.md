@@ -42,10 +42,16 @@
 - Executor: AST → Table API calls, type conversion, two-phase delete, pre-computed column indices
 - Interactive REPL and single-command CLI mode
 
+### Phase 6.1: Overflow Text
+- Overflow file storage for large text values (OverflowHeader, OverflowRef, `.overflow` files)
+- Fragmentation tracking on delete/update
+- Column-by-column update comparison (reuse refs for unchanged text)
+- In-memory reverse index for overflow entries (rebuilt on Table::open)
+- Overflow file compaction (rewrite with only live entries, patch records)
+
 ## Planned
 
-### Phase 6: Advanced Features
-- File-stored text (overflow large text to separate file, is_file_stored flag)
+### Phase 6: Advanced Features (continued)
 - Page caching (avoid re-reading pages from disk)
 - Transaction support (write-ahead log or similar)
 
@@ -69,5 +75,6 @@ Page Layer (1)
               └─→ Cross-Page Ops (5) — compaction + migration need index
         └─→ SQL Pipeline (7) — translates SQL into Table API calls
               └─→ B-Tree Index (8) — query planner uses B-tree for range queries
-  └─→ Advanced Features (6) — file-stored text, caching, transactions
+  └─→ Overflow Text (6.1) — large text in separate files with compaction
+  └─→ Advanced Features (6.2+) — caching, transactions
 ```
