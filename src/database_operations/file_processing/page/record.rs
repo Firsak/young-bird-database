@@ -169,6 +169,10 @@ impl PageRecordContent {
     pub fn get_content(&self) -> &Vec<ContentTypes> {
         &self.content
     }
+
+    pub fn get_content_mut(&mut self) -> &mut Vec<ContentTypes> {
+        &mut self.content
+    }
 }
 
 impl BinarySerde for PageRecordContent {

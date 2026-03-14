@@ -853,6 +853,7 @@ fn content_type_string(value: &ContentTypes) -> String {
         ContentTypes::UInt64(v) => v.to_string(),
         ContentTypes::Float32(v) => v.to_string(),
         ContentTypes::Float64(v) => v.to_string(),
+        ContentTypes::OverflowText(_) => unreachable!("OverflowText should be resolved by Table before reaching executor"),
     }
 }
 

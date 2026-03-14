@@ -1,4 +1,5 @@
 use std::fmt;
+use super::overflow::OverflowRef;
 use super::traits::BinarySerde;
 
 /// A typed column value. Tag byte 0–12 determines the variant.
@@ -18,6 +19,10 @@ pub enum ContentTypes {
     UInt64(u64),   // 10
     Float32(f32),  // 11
     Float64(f64),  // 12
+    /// Internal variant: text stored in an overflow file.
+    /// The Table layer converts Text → OverflowText on write
+    /// and OverflowText → Text on read. Never visible to users.
+    OverflowText(OverflowRef), // tag 2, is_file_stored = 1
 }
 
 /// Schema-level column type. Single tag byte (0–11).
@@ -54,6 +59,7 @@ impl fmt::Display for ContentTypes {
             ContentTypes::UInt64(_) => write!(f, "UInt64"),
             ContentTypes::Float32(_) => write!(f, "Float32"),
             ContentTypes::Float64(_) => write!(f, "Float64"),
+            ContentTypes::OverflowText(_) => write!(f, "Text"),
         }
     }
 }
@@ -213,6 +219,14 @@ impl BinarySerde for ContentTypes {
                 bytes.extend_from_slice(&val.to_le_bytes());
                 bytes
             }
+
+            ContentTypes::OverflowText(overflow_ref) => {
+                let mut bytes = vec![2]; // same tag as Text
+                let is_file_stored: u8 = 1;
+                bytes.push(is_file_stored);
+                bytes.extend_from_slice(&overflow_ref.to_bytes());
+                bytes
+            }
         }
     }
 
@@ -252,9 +266,19 @@ impl BinarySerde for ContentTypes {
                     ));
                 }
                 let is_file_stored = bytes[1];
+                if is_file_stored == 1 {
+                    if bytes.len() != 18 {
+                        return Err(format!(
+                            "ContentTypes::OverflowText deserialization failed: expected 18 bytes, got {}",
+                            bytes.len()
+                        ));
+                    }
+                    let overflow_ref = OverflowRef::from_bytes(&bytes[2..18])?;
+                    return Ok(ContentTypes::OverflowText(overflow_ref));
+                }
                 if is_file_stored != 0 {
                     return Err(format!(
-                        "ContentTypes::Text deserialization failed: file-stored text (is_file_stored={}) is not yet supported",
+                        "ContentTypes::Text deserialization failed: invalid is_file_stored value {}",
                         is_file_stored
                     ));
                 }

@@ -1,8 +1,15 @@
+use std::usize;
+
 use super::table_header::TableHeader;
 use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::index::reading::read_index;
 use crate::database_operations::file_processing::index::writing::write_index;
 use crate::database_operations::file_processing::index::HashIndex;
+use crate::database_operations::file_processing::overflow::reading::read_overflow_text;
+use crate::database_operations::file_processing::overflow::writing::{
+    add_fragmented_space, append_overflow_text, create_overflow_file, rewrite_overflow_file,
+};
+use crate::database_operations::file_processing::overflow::{OverflowRef, OverflowReverseIndex};
 use crate::database_operations::file_processing::page::header::PageHeader;
 use crate::database_operations::file_processing::page::offsets;
 use crate::database_operations::file_processing::page::page::Page;
@@ -21,7 +28,9 @@ use crate::database_operations::file_processing::table::writing::write_table_hea
 use crate::database_operations::file_processing::table::ColumnDef;
 use crate::database_operations::file_processing::traits::BinarySerde;
 use crate::database_operations::file_processing::types::{ColumnTypes, ContentTypes};
-use crate::database_operations::file_processing::{HEADER_SIZE, KBYTES, PAGE_RECORD_METADATA_SIZE};
+use crate::database_operations::file_processing::{
+    HEADER_SIZE, KBYTES, OVERFLOW_HEADER_SIZE, OVERFLOW_THRESHOLD, PAGE_RECORD_METADATA_SIZE,
+};
 
 /// High-level Table API. Wraps a TableHeader and resolves
 /// global page numbers to concrete (filename, local_page) pairs.
@@ -31,6 +40,7 @@ pub struct Table {
     base_path: String,
     header: TableHeader,
     index: HashIndex,
+    overflow_reverse: OverflowReverseIndex,
 }
 
 /// Result of resolving a global page number: which file and which
@@ -47,12 +57,14 @@ impl Table {
         base_path: String,
         header: TableHeader,
         index: HashIndex,
+        overflow_reverse: OverflowReverseIndex,
     ) -> Self {
         Self {
             name,
             base_path,
             header,
             index,
+            overflow_reverse,
         }
     }
 
@@ -75,6 +87,11 @@ impl Table {
         format!("{}/{}.idx", self.base_path, self.name)
     }
 
+    /// Returns the path to an .overflow file by file index.
+    fn overflow_path(&self, file_index: u32) -> String {
+        format!("{}/{}_{}.overflow", self.base_path, self.name, file_index)
+    }
+
     /// Persists the current in-memory header to the .meta file.
     fn save_header(&self) -> Result<(), DatabaseError> {
         write_table_header(&self.meta_path(), &self.header)
@@ -83,6 +100,34 @@ impl Table {
     /// Persists the current in-memory index to the .idx file.
     fn save_index(&self) -> Result<(), DatabaseError> {
         write_index(&self.idx_path(), &self.index)
+    }
+
+    /// Rebuilds the overflow reverse index by scanning all pages.
+    /// Called during `Table::open` to populate the in-memory reverse index.
+    fn rebuild_overflow_reverse(&mut self) -> Result<(), DatabaseError> {
+        for page_number in 0..self.header.get_pages_count() {
+            let resolved_filename = self.resolve_file(page_number)?;
+            let page = read_page(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                self.header.get_page_kbytes(),
+            )?;
+
+            for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
+                let record_content = page.get_record_content_by_slot_index(index);
+                for (column_index, value) in record_content.get_content().iter().enumerate() {
+                    if let ContentTypes::OverflowText(o_ref) = value {
+                        self.overflow_reverse.insert(
+                            o_ref.get_file_index(),
+                            o_ref.get_offset(),
+                            record_metadata.get_id(),
+                            column_index as u16,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Opens an existing table by reading its .meta and .idx files.
@@ -94,10 +139,7 @@ impl Table {
     /// # Errors
     /// * `InvalidArgument` - Empty name
     /// * `Io` - .meta or .idx file doesn't exist or can't be read
-    pub fn open(
-        name: String,
-        base_path: String,
-    ) -> Result<Self, DatabaseError> {
+    pub fn open(name: String, base_path: String) -> Result<Self, DatabaseError> {
         if name.trim().is_empty() {
             return Err(DatabaseError::InvalidArgument(
                 "Table name must not be empty".to_string(),
@@ -107,12 +149,16 @@ impl Table {
         let header = read_table_header(&meta_path)?;
         let hash_index_path = format!("{}/{}.idx", base_path, name);
         let index = read_index(&hash_index_path)?;
-        Ok(Self {
+        let overflow_reverse = OverflowReverseIndex::new();
+        let mut table = Self {
             name,
             base_path,
             header,
             index,
-        })
+            overflow_reverse,
+        };
+        table.rebuild_overflow_reverse()?;
+        Ok(table)
     }
 
     /// Creates a new table: writes .meta, first .dat (one empty page), and .idx files.
@@ -178,7 +224,8 @@ impl Table {
             columns,
         );
         let index = HashIndex::new(16);
-        let table = Table::new(name, base_path, table_header, index);
+        let overflow_reverse = OverflowReverseIndex::new();
+        let table = Table::new(name, base_path, table_header, index, overflow_reverse);
         table.save_header()?;
         write_new_page(&table.dat_path(0), 0, page_kbytes)?;
         table.save_index()?;
@@ -193,6 +240,11 @@ impl Table {
     /// Returns a mutable reference to the table schema (e.g., to update pages_count).
     pub fn get_header_mut(&mut self) -> &mut TableHeader {
         &mut self.header
+    }
+
+    /// Returns a shared reference to the overflow reverse index.
+    pub fn get_overflow_reverse(&self) -> &OverflowReverseIndex {
+        &self.overflow_reverse
     }
 
     /// Checks that a non-null value's type matches the column definition.
@@ -275,6 +327,145 @@ impl Table {
         Ok(())
     }
 
+    fn convert_text_to_overflow_helper(&self, text: &str) -> Result<ContentTypes, DatabaseError> {
+        if text.len() <= OVERFLOW_THRESHOLD {
+            return Ok(ContentTypes::Text(text.to_string()));
+        }
+        if text.len() as u64
+            > (self.header.get_overflow_kbytes() as usize * KBYTES - OVERFLOW_HEADER_SIZE) as u64
+        {
+            return Err(DatabaseError::InvalidArgument(
+                "Text is too long to store. Increase the maximum table overflow size".to_string(),
+            ));
+        }
+        let mut file_index = 0;
+        let mut overflow_ref: Option<OverflowRef>;
+        loop {
+            let filename = self.overflow_path(file_index);
+            let max_file_size = self.header.get_overflow_kbytes() as u64 * KBYTES as u64;
+            match append_overflow_text(filename.as_str(), file_index, text, max_file_size) {
+                Ok(o_ref) => overflow_ref = Some(o_ref),
+                Err(DatabaseError::InvalidArgument(ref e))
+                    if e == "Text is too long to insert in the file" =>
+                {
+                    overflow_ref = None;
+                }
+                Err(DatabaseError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    create_overflow_file(&filename)?;
+                    overflow_ref = Some(append_overflow_text(
+                        filename.as_str(),
+                        file_index,
+                        text,
+                        max_file_size,
+                    )?);
+                }
+                Err(e) => return Err(e),
+            }
+
+            file_index += 1;
+
+            if overflow_ref.is_none() {
+                continue;
+            }
+
+            return Ok(ContentTypes::OverflowText(overflow_ref.unwrap()));
+        }
+    }
+
+    /// Scans a record's columns and replaces oversized Text values with OverflowText references.
+    /// Called before writing a record to a page.
+    ///
+    /// For each Text value longer than OVERFLOW_THRESHOLD:
+    /// 1. Find the current overflow file (or create the first one)
+    /// 2. Append text to the overflow file
+    /// 3. If the file is full, create the next overflow file and retry
+    /// 4. Replace Text(s) with OverflowText(ref) in the content
+    fn convert_text_to_overflow(
+        &self,
+        content: &mut Vec<ContentTypes>,
+    ) -> Result<(), DatabaseError> {
+        for ct in content.iter_mut() {
+            if let ContentTypes::Text(text) = ct {
+                *ct = self.convert_text_to_overflow_helper(text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Scans a record's columns and replaces OverflowText references with actual Text values.
+    /// Called after reading a record from a page.
+    ///
+    /// For each OverflowText(ref):
+    /// 1. Build the overflow filename from ref.get_file_index()
+    /// 2. Read the text from the overflow file
+    /// 3. Replace OverflowText(ref) with Text(s) in the content
+    fn resolve_overflow_to_text(
+        &self,
+        content: &mut Vec<ContentTypes>,
+    ) -> Result<(), DatabaseError> {
+        for ct in content.iter_mut() {
+            if let ContentTypes::OverflowText(o_ref) = ct {
+                let filename = self.overflow_path(o_ref.get_file_index());
+                let res = read_overflow_text(&filename, o_ref)?;
+                *ct = ContentTypes::Text(res);
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds fragmented space for all OverflowText references in the content.
+    /// Called before deleting a record that may contain overflow text.
+    fn release_overflow_refs(&self, content: &[ContentTypes]) -> Result<(), DatabaseError> {
+        for ct in content {
+            if let ContentTypes::OverflowText(o_ref) = ct {
+                let filename = self.overflow_path(o_ref.get_file_index());
+                add_fragmented_space(&filename, o_ref.get_length())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Column-by-column overflow handling for updates.
+    /// Compares old content (raw from page, may have OverflowText refs) with
+    /// new content (plain Text from caller) and:
+    ///   - Reuses old OverflowRef when text hasn't changed
+    ///   - Releases old OverflowRef + writes new overflow when text changed
+    ///   - Writes new overflow when old was inline but new exceeds threshold
+    ///   - Releases old OverflowRef when old was overflow but new is inline/non-text
+    fn convert_text_to_overflow_for_update(
+        &self,
+        old_content: &[ContentTypes],
+        new_content: &mut Vec<ContentTypes>,
+    ) -> Result<(), DatabaseError> {
+        for (old_content, new_content) in old_content.iter().zip(new_content.iter_mut()) {
+            match (old_content, &*new_content) {
+                (ContentTypes::OverflowText(o_ref), ContentTypes::Text(n_text)) => {
+                    let filename = self.overflow_path(o_ref.get_file_index());
+                    let o_text = read_overflow_text(&filename, o_ref)?;
+                    if o_text == *n_text {
+                        *new_content = old_content.clone();
+                    } else {
+                        let n_text_owned = n_text.clone();
+                        add_fragmented_space(&filename, o_ref.get_length())?;
+                        *new_content = self.convert_text_to_overflow_helper(&n_text_owned)?;
+                    }
+                }
+                (ContentTypes::Text(o_text), ContentTypes::Text(n_text)) => {
+                    if o_text != n_text {
+                        let n_text_owned = n_text.clone();
+                        *new_content = self.convert_text_to_overflow_helper(&n_text_owned)?;
+                    }
+                }
+                (ContentTypes::OverflowText(o_ref), _) => {
+                    let filename = self.overflow_path(o_ref.get_file_index());
+                    add_fragmented_space(&filename, o_ref.get_length())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Inserts a record with an auto-incremented ID.
     /// Uses `next_record_id` from the table header, then delegates to `insert_record`.
     ///
@@ -309,9 +500,22 @@ impl Table {
     pub fn insert_record(
         &mut self,
         record_id: u64,
-        record_content: PageRecordContent,
+        mut record_content: PageRecordContent,
     ) -> Result<(), DatabaseError> {
         self.validate_record(&record_content)?;
+        self.convert_text_to_overflow(record_content.get_content_mut())?;
+
+        // Register new overflow refs in reverse index
+        for (col_idx, value) in record_content.get_content().iter().enumerate() {
+            if let ContentTypes::OverflowText(o_ref) = value {
+                self.overflow_reverse.insert(
+                    o_ref.get_file_index(),
+                    o_ref.get_offset(),
+                    record_id,
+                    col_idx as u16,
+                );
+            }
+        }
 
         let page_kbytes = self.header.get_page_kbytes();
         let record_size = record_content.to_bytes().len() + PAGE_RECORD_METADATA_SIZE;
@@ -384,12 +588,13 @@ impl Table {
                 slot_index,
                 page_kbytes,
             )?;
-            let record_content = read_record_content(
+            let mut record_content = read_record_content(
                 &resolved_filename.filename,
                 resolved_filename.local_page_index,
                 page_kbytes,
                 &record_metadata,
             )?;
+            self.resolve_overflow_to_text(record_content.get_content_mut())?;
             return Ok(record_content);
         }
 
@@ -420,9 +625,10 @@ impl Table {
                 page_kbytes,
             )?;
             for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
-                let record_content = page.get_record_content_by_slot_index(index);
+                let mut record_content = page.get_record_content_by_slot_index(index).clone();
+                self.resolve_overflow_to_text(record_content.get_content_mut())?;
                 if filter(record_metadata.get_id(), record_content.get_content()) {
-                    records.push((record_metadata.get_id(), record_content.clone()));
+                    records.push((record_metadata.get_id(), record_content));
                 }
             }
         }
@@ -453,7 +659,8 @@ impl Table {
                 page_kbytes,
             )?;
             for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
-                let record_content = page.get_record_content_by_slot_index(index);
+                let mut record_content = page.get_record_content_by_slot_index(index).clone();
+                self.resolve_overflow_to_text(record_content.get_content_mut())?;
                 if filter(record_metadata.get_id(), record_content.get_content()) {
                     ids.push(record_metadata.get_id());
                 }
@@ -475,7 +682,32 @@ impl Table {
         if let Some(record_pos) = lookup {
             let page_kbytes = self.header.get_page_kbytes();
             let page_number = record_pos.0;
+            let slot_index = record_pos.1;
             let resolved_filename = self.resolve_file(page_number)?;
+
+            // Read raw content before deleting to release overflow refs
+            let old_metadata = read_record_metadata(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                slot_index,
+                page_kbytes,
+            )?;
+            let old_content = read_record_content(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                page_kbytes,
+                &old_metadata,
+            )?;
+            self.release_overflow_refs(old_content.get_content())?;
+
+            // Remove old overflow refs from reverse index
+            for value in old_content.get_content() {
+                if let ContentTypes::OverflowText(o_ref) = value {
+                    self.overflow_reverse
+                        .remove(o_ref.get_file_index(), o_ref.get_offset());
+                }
+            }
+
             page_delete_record(
                 &resolved_filename.filename,
                 resolved_filename.local_page_index,
@@ -503,7 +735,7 @@ impl Table {
     pub fn update_record(
         &mut self,
         record_id: u64,
-        record_content: PageRecordContent,
+        mut record_content: PageRecordContent,
     ) -> Result<(), DatabaseError> {
         self.validate_record(&record_content)?;
 
@@ -511,7 +743,47 @@ impl Table {
         if let Some(record_pos) = lookup {
             let page_kbytes = self.header.get_page_kbytes();
             let page_number = record_pos.0;
+            let slot_index = record_pos.1;
             let resolved_filename = self.resolve_file(page_number)?;
+
+            // Read old raw content for column-by-column overflow comparison
+            let old_metadata = read_record_metadata(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                slot_index,
+                page_kbytes,
+            )?;
+            let old_content = read_record_content(
+                &resolved_filename.filename,
+                resolved_filename.local_page_index,
+                page_kbytes,
+                &old_metadata,
+            )?;
+            // Remove old overflow refs from reverse index
+            for value in old_content.get_content() {
+                if let ContentTypes::OverflowText(o_ref) = value {
+                    self.overflow_reverse
+                        .remove(o_ref.get_file_index(), o_ref.get_offset());
+                }
+            }
+
+            self.convert_text_to_overflow_for_update(
+                old_content.get_content(),
+                record_content.get_content_mut(),
+            )?;
+
+            // Register new overflow refs in reverse index
+            for (col_idx, value) in record_content.get_content().iter().enumerate() {
+                if let ContentTypes::OverflowText(o_ref) = value {
+                    self.overflow_reverse.insert(
+                        o_ref.get_file_index(),
+                        o_ref.get_offset(),
+                        record_id,
+                        col_idx as u16,
+                    );
+                }
+            }
+
             let update_result = page_update_record(
                 &resolved_filename.filename,
                 resolved_filename.local_page_index,
@@ -678,6 +950,108 @@ impl Table {
         Ok(ratio)
     }
 
+    /// Compacts a single overflow file by rewriting it with only live entries.
+    /// Uses the reverse index to find live entries, reads each record to get
+    /// the OverflowRef length, rewrites the file, then patches records with new refs.
+    ///
+    /// # Arguments
+    /// * `file_index` - Which overflow file to compact (0-based)
+    ///
+    /// # Errors
+    /// * `RecordNotFound` - Reverse index references a record not in the hash index
+    /// * `Io` - File system failure
+    pub fn compact_overflow_file(&mut self, file_index: u32) -> Result<(), DatabaseError> {
+        let filename = self.overflow_path(file_index);
+        let page_kbytes = self.header.get_page_kbytes();
+
+        let live_entries = self.overflow_reverse.get_by_file(file_index);
+
+        if live_entries.is_empty() {
+            return Ok(());
+        }
+
+        // (offset, length)
+        let mut entries: Vec<(u64, u32)> = vec![];
+
+        for (offset, record_id, col_index) in live_entries.iter() {
+            let (page_number, slot_index) =
+                self.index
+                    .lookup(*record_id)
+                    .ok_or(DatabaseError::InvalidArgument(format!(
+                        "No record with id {}",
+                        record_id
+                    )))?;
+            let resolved = self.resolve_file(page_number)?;
+            let record_metadata = read_record_metadata(
+                &resolved.filename,
+                resolved.local_page_index,
+                slot_index,
+                page_kbytes,
+            )?;
+            let record_content = read_record_content(
+                &resolved.filename,
+                resolved.local_page_index,
+                page_kbytes,
+                &record_metadata,
+            )?;
+
+            match &record_content.get_content()[*col_index as usize] {
+                ContentTypes::OverflowText(o_ref) => entries.push((*offset, o_ref.get_length())),
+                _ => {
+                    return Err(DatabaseError::InvalidArgument(format!("Content at filename {} page number {} slot index {} column index {} is not an overflow reference", &filename, page_number, slot_index, col_index)));
+                }
+            }
+        }
+
+        let new_ref_map = rewrite_overflow_file(&filename, file_index, entries)?;
+
+        for (offset, record_id, col_index) in live_entries {
+            let (page_number, slot_index) =
+                self.index
+                    .lookup(record_id)
+                    .ok_or(DatabaseError::InvalidArgument(format!(
+                        "No record with id {}",
+                        record_id
+                    )))?;
+            let resolved = self.resolve_file(page_number)?;
+            let record_metadata = read_record_metadata(
+                &resolved.filename,
+                resolved.local_page_index,
+                slot_index,
+                page_kbytes,
+            )?;
+            let mut record_content = read_record_content(
+                &resolved.filename,
+                resolved.local_page_index,
+                page_kbytes,
+                &record_metadata,
+            )?;
+
+            let content = record_content.get_content_mut();
+            let new_content_value =
+                new_ref_map
+                    .get(&offset)
+                    .ok_or(DatabaseError::InvalidArgument(format!(
+                        "No content at offset {} after rewriting overflow file",
+                        offset
+                    )))?;
+            content[col_index as usize] = ContentTypes::OverflowText(*new_content_value);
+
+            page_update_record(
+                &resolved.filename,
+                resolved.local_page_index,
+                page_kbytes,
+                record_id,
+                record_content,
+            )?;
+
+            self.overflow_reverse
+                .update_offset(file_index, offset, new_content_value.get_offset());
+        }
+
+        Ok(())
+    }
+
     /// Given a global page number, returns the .dat filename and
     /// the local page number within that file.
     ///
@@ -726,6 +1100,7 @@ mod tests {
                 vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
             ),
             HashIndex::new(16),
+            OverflowReverseIndex::new(),
         )
     }
 

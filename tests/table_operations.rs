@@ -269,9 +269,10 @@ fn insert_multiple_records() {
 fn insert_triggers_new_page() {
     let (mut table, dir) = create_test_table("insert_new_page");
 
-    // Fill the first page with large records until a new page is created
-    let big_name = "x".repeat(2000); // ~2KB per record
-    for i in 1..=10 {
+    // Fill the first page with inline records until a new page is created
+    // Using text under OVERFLOW_THRESHOLD (256) so it stays inline at ~247 bytes/record
+    let big_name = "x".repeat(200);
+    for i in 1..=40 {
         table
             .insert_record(i, make_record(i as i64, &big_name))
             .expect(&format!("Failed to insert record {}", i));
@@ -318,9 +319,9 @@ fn insert_and_reopen_table() {
 fn insert_new_page_and_reopen() {
     let (mut table, dir) = create_test_table("insert_new_page_reopen");
 
-    // Fill with large records to force new page creation
-    let big_name = "y".repeat(2000);
-    for i in 1..=10 {
+    // Fill with inline records to force new page creation
+    let big_name = "y".repeat(200);
+    for i in 1..=40 {
         table
             .insert_record(i, make_record(i as i64, &big_name))
             .expect(&format!("Failed to insert record {}", i));
@@ -382,9 +383,9 @@ fn read_nonexistent_record() {
 fn read_record_from_second_page() {
     let (mut table, dir) = create_test_table("read_from_second_page");
 
-    // Fill with large records to force multiple pages
-    let big_name = "z".repeat(2000);
-    for i in 1..=10 {
+    // Fill with inline records to force multiple pages
+    let big_name = "z".repeat(200);
+    for i in 1..=40 {
         table
             .insert_record(i, make_record(i as i64, &big_name))
             .expect(&format!("Failed to insert record {}", i));
@@ -393,10 +394,10 @@ fn read_record_from_second_page() {
     assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
 
     // Read a record that should be on a later page
-    let content = table.read_record(10).expect("Failed to read record 10");
+    let content = table.read_record(40).expect("Failed to read record 40");
     let values = content.get_content();
 
-    assert_eq!(values[0], ContentTypes::Int64(10));
+    assert_eq!(values[0], ContentTypes::Int64(40));
 
     cleanup_dir(&dir);
 }
@@ -480,17 +481,17 @@ fn delete_one_of_multiple_records() {
 fn delete_record_from_second_page() {
     let (mut table, dir) = create_test_table("delete_from_second_page");
 
-    let big_name = "d".repeat(2000);
-    for i in 1..=10 {
+    let big_name = "d".repeat(200);
+    for i in 1..=40 {
         table.insert_record(i, make_record(i as i64, &big_name))
             .expect(&format!("Failed to insert record {}", i));
     }
 
     assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
 
-    table.delete_record(10).expect("Failed to delete record 10");
+    table.delete_record(40).expect("Failed to delete record 40");
 
-    assert!(table.read_record(10).is_err(), "Record 10 should be deleted");
+    assert!(table.read_record(40).is_err(), "Record 40 should be deleted");
     // Earlier records should still exist
     assert!(table.read_record(1).is_ok());
 
@@ -898,9 +899,9 @@ fn compact_table_no_fragmentation() {
 fn compact_table_consolidates_sparse_pages() {
     let (mut table, dir) = create_test_table("compact_sparse");
 
-    // Insert large records to force multiple pages
-    let big_name = "c".repeat(2000);
-    for i in 1..=10 {
+    // Insert inline records to force multiple pages
+    let big_name = "c".repeat(200);
+    for i in 1..=40 {
         table
             .insert_record(i, make_record(i as i64, &big_name))
             .expect("insert failed");
@@ -909,7 +910,7 @@ fn compact_table_consolidates_sparse_pages() {
     assert!(pages_before > 1, "Need multiple pages for this test");
 
     // Delete most records, leaving only 2 that fit in 1 page
-    for i in 3..=10 {
+    for i in 3..=40 {
         table.delete_record(i).expect("delete failed");
     }
 
@@ -1318,14 +1319,14 @@ fn scan_delete_by_id() {
 fn scan_delete_across_pages() {
     let (mut table, dir) = create_test_table("scan_del_pages");
 
-    let big_name = "x".repeat(2000);
-    for _ in 0..6 {
+    let big_name = "x".repeat(200);
+    for _ in 0..40 {
         table.insert(make_record(1, &big_name)).expect("insert failed");
     }
     assert!(table.get_header().get_pages_count() > 1, "Need multiple pages");
 
     let ids = table.scan_record_ids(|_id, _cols| true).expect("scan failed");
-    assert_eq!(ids.len(), 6);
+    assert_eq!(ids.len(), 40);
     for id in &ids {
         table.delete_record(*id).expect("delete failed");
     }
@@ -1414,6 +1415,662 @@ fn scan_delete_cascade_hard_deletes() {
     let remaining = table.scan_records(|_id, _cols| true).expect("scan failed");
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].1.get_content()[0], ContentTypes::Int64(10));
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Overflow fragmentation tracking tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn overflow_delete_adds_fragmented_space() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("overflow_del_frag");
+
+    let big_text = "D".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    // Verify fragmented_space starts at 0
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    let header_before = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_before.get_fragmented_space(), 0);
+
+    // Delete the record — should mark 500 bytes as fragmented
+    table.delete_record(1).expect("delete failed");
+
+    let header_after = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_after.get_fragmented_space(), 500);
+
+    // used_space should NOT change (append-only, just tracking dead space)
+    assert_eq!(header_before.get_used_space(), header_after.get_used_space());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_update_different_text_adds_fragmented_space() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("overflow_upd_diff");
+
+    let text_v1 = "A".repeat(500);
+    table
+        .insert_record(1, make_record(1, &text_v1))
+        .expect("insert failed");
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    let header_before = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_before.get_fragmented_space(), 0);
+
+    // Update to different overflow text — old 500 bytes fragmented, new 600 bytes appended
+    let text_v2 = "B".repeat(600);
+    table
+        .update_record(1, make_record(1, &text_v2))
+        .expect("update failed");
+
+    let header_after = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_after.get_fragmented_space(), 500);
+    assert_eq!(
+        header_after.get_used_space(),
+        header_before.get_used_space() + 600
+    );
+
+    // Data still readable
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(text_v2));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_update_same_text_no_fragmentation() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("overflow_upd_same");
+
+    let big_text = "S".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    let header_before = read_overflow_header(&overflow_path).expect("read header failed");
+
+    // Update with identical text — ref should be reused, no fragmentation
+    table
+        .update_record(1, make_record(1, &big_text))
+        .expect("update failed");
+
+    let header_after = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_after.get_fragmented_space(), 0);
+    assert_eq!(header_after.get_used_space(), header_before.get_used_space());
+
+    // Data still correct
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_update_to_inline_releases_ref() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("overflow_upd_inline");
+
+    let big_text = "L".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+
+    // Update to short text — old overflow ref should be released
+    table
+        .update_record(1, make_record(1, "short"))
+        .expect("update failed");
+
+    let header_after = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header_after.get_fragmented_space(), 500);
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(
+        content.get_content()[1],
+        ContentTypes::Text("short".to_string())
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_update_from_inline_to_overflow_no_fragmentation() {
+    let (mut table, dir) = create_test_table("overflow_upd_to_ovf");
+
+    table
+        .insert_record(1, make_record(1, "short"))
+        .expect("insert failed");
+
+    // No overflow file yet
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    assert!(!std::path::Path::new(&overflow_path).exists());
+
+    // Update to large text — creates overflow, no fragmentation since old was inline
+    let big_text = "G".repeat(500);
+    table
+        .update_record(1, make_record(1, &big_text))
+        .expect("update failed");
+
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+    let header = read_overflow_header(&overflow_path).expect("read header failed");
+    assert_eq!(header.get_fragmented_space(), 0);
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Overflow text integration tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn overflow_insert_and_read_large_text() {
+    let (mut table, dir) = create_test_table("overflow_insert_read");
+
+    let big_text = "A".repeat(500); // Above OVERFLOW_THRESHOLD (256)
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[0], ContentTypes::Int64(1));
+    assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_small_text_stays_inline() {
+    let (mut table, dir) = create_test_table("overflow_inline");
+
+    let small_text = "B".repeat(256); // Exactly at threshold — stays inline
+    table
+        .insert_record(1, make_record(1, &small_text))
+        .expect("insert failed");
+
+    // No overflow file should be created
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    assert!(
+        !std::path::Path::new(&overflow_path).exists(),
+        "Overflow file should not exist for inline text"
+    );
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(small_text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_multiple_records_with_large_text() {
+    let (mut table, dir) = create_test_table("overflow_multi");
+
+    for i in 1..=5u64 {
+        let text = "X".repeat(400 + i as usize * 50);
+        table
+            .insert_record(i, make_record(i as i64, &text))
+            .expect("insert failed");
+    }
+
+    // Read back all records and verify text is correct
+    for i in 1..=5u64 {
+        let expected_text = "X".repeat(400 + i as usize * 50);
+        let content = table.read_record(i).expect("read failed");
+        assert_eq!(content.get_content()[1], ContentTypes::Text(expected_text));
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_scan_records_resolves_text() {
+    let (mut table, dir) = create_test_table("overflow_scan");
+
+    let big_text = "S".repeat(500);
+    table.insert(make_record(1, &big_text)).expect("insert failed");
+    table.insert(make_record(2, "small")).expect("insert failed");
+
+    let results = table
+        .scan_records(|_id, _cols| true)
+        .expect("scan failed");
+
+    assert_eq!(results.len(), 2);
+
+    // Both records should have resolved text (no OverflowText leaking out)
+    let texts: Vec<&ContentTypes> = results.iter().map(|(_, c)| &c.get_content()[1]).collect();
+    assert!(texts.contains(&&ContentTypes::Text(big_text)));
+    assert!(texts.contains(&&ContentTypes::Text("small".to_string())));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_update_to_large_text() {
+    let (mut table, dir) = create_test_table("overflow_update");
+
+    table
+        .insert_record(1, make_record(1, "short"))
+        .expect("insert failed");
+
+    // Update to oversized text — should go to overflow
+    let big_text = "U".repeat(600);
+    table
+        .update_record(1, make_record(1, &big_text))
+        .expect("update failed");
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_persists_across_reopen() {
+    let (mut table, dir) = create_test_table("overflow_reopen");
+
+    let big_text = "R".repeat(1000);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    // Reopen the table from disk
+    let reopened =
+        Table::open("items".to_string(), dir.clone()).expect("reopen failed");
+
+    let content = reopened.read_record(1).expect("read after reopen failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_file_is_created() {
+    let (mut table, dir) = create_test_table("overflow_file_exists");
+
+    let big_text = "F".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    assert!(
+        std::path::Path::new(&overflow_path).exists(),
+        "Overflow file should exist after inserting large text"
+    );
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_mixed_inline_and_overflow_columns() {
+    let dir = temp_dir("overflow_mixed_cols");
+    let table = Table::create(
+        "mixed".to_string(),
+        dir.clone(),
+        5,
+        8,
+        1024,
+        vec![
+            ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
+            ColumnDef::new(ColumnTypes::Text, false, "short_text".to_string()),
+            ColumnDef::new(ColumnTypes::Text, false, "long_text".to_string()),
+        ],
+    )
+    .expect("create failed");
+
+    let mut table = table;
+    let short = "inline";
+    let long = "O".repeat(500);
+
+    let record = PageRecordContent::new(vec![
+        ContentTypes::Int64(42),
+        ContentTypes::Text(short.to_string()),
+        ContentTypes::Text(long.clone()),
+    ]);
+    table.insert_record(1, record).expect("insert failed");
+
+    let content = table.read_record(1).expect("read failed");
+    assert_eq!(content.get_content()[0], ContentTypes::Int64(42));
+    assert_eq!(
+        content.get_content()[1],
+        ContentTypes::Text(short.to_string())
+    );
+    assert_eq!(content.get_content()[2], ContentTypes::Text(long));
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Overflow reverse index tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn overflow_reverse_index_populated_on_insert() {
+    let (mut table, dir) = create_test_table("rev_idx_insert");
+
+    let big_text = "A".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let rev = table.get_overflow_reverse();
+    assert_eq!(rev.len(), 1);
+
+    let entries = rev.get_by_file(0);
+    assert_eq!(entries.len(), 1);
+    // (offset, record_id, column_index)
+    assert_eq!(entries[0].1, 1); // record_id
+    assert_eq!(entries[0].2, 1); // column_index (column 0 is Int64, column 1 is Text)
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_not_populated_for_inline() {
+    let (mut table, dir) = create_test_table("rev_idx_inline");
+
+    table
+        .insert_record(1, make_record(1, "short"))
+        .expect("insert failed");
+
+    assert!(table.get_overflow_reverse().is_empty());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_removed_on_delete() {
+    let (mut table, dir) = create_test_table("rev_idx_delete");
+
+    let big_text = "D".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+    assert_eq!(table.get_overflow_reverse().len(), 1);
+
+    table.delete_record(1).expect("delete failed");
+    assert!(table.get_overflow_reverse().is_empty());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_updated_on_update_different_text() {
+    let (mut table, dir) = create_test_table("rev_idx_upd_diff");
+
+    let text_v1 = "A".repeat(500);
+    table
+        .insert_record(1, make_record(1, &text_v1))
+        .expect("insert failed");
+
+    let entries_before = table.get_overflow_reverse().get_by_file(0);
+    assert_eq!(entries_before.len(), 1);
+    let old_offset = entries_before[0].0;
+
+    // Update to different overflow text — offset should change
+    let text_v2 = "B".repeat(600);
+    table
+        .update_record(1, make_record(1, &text_v2))
+        .expect("update failed");
+
+    let rev = table.get_overflow_reverse();
+    assert_eq!(rev.len(), 1);
+    let entries_after = rev.get_by_file(0);
+    assert_eq!(entries_after.len(), 1);
+    assert_eq!(entries_after[0].1, 1); // same record_id
+    assert_ne!(entries_after[0].0, old_offset); // different offset
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_unchanged_on_update_same_text() {
+    let (mut table, dir) = create_test_table("rev_idx_upd_same");
+
+    let big_text = "S".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+
+    let entries_before = table.get_overflow_reverse().get_by_file(0);
+    let old_offset = entries_before[0].0;
+
+    // Update with identical text — offset should stay the same (ref reused)
+    table
+        .update_record(1, make_record(1, &big_text))
+        .expect("update failed");
+
+    let entries_after = table.get_overflow_reverse().get_by_file(0);
+    assert_eq!(entries_after.len(), 1);
+    assert_eq!(entries_after[0].0, old_offset); // same offset (reused)
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_cleared_on_update_to_inline() {
+    let (mut table, dir) = create_test_table("rev_idx_upd_inline");
+
+    let big_text = "L".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+    assert_eq!(table.get_overflow_reverse().len(), 1);
+
+    // Update to short text — overflow ref removed
+    table
+        .update_record(1, make_record(1, "short"))
+        .expect("update failed");
+
+    assert!(table.get_overflow_reverse().is_empty());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_rebuilt_on_open() {
+    let (mut table, dir) = create_test_table("rev_idx_reopen");
+
+    let big_text = "R".repeat(500);
+    table
+        .insert_record(1, make_record(1, &big_text))
+        .expect("insert failed");
+    table
+        .insert_record(2, make_record(2, &"Q".repeat(400)))
+        .expect("insert failed");
+
+    // Reopen — reverse index should be rebuilt from page scan
+    let reopened = Table::open("items".to_string(), dir.clone()).expect("reopen failed");
+
+    let rev = reopened.get_overflow_reverse();
+    assert_eq!(rev.len(), 2);
+
+    let entries = rev.get_by_file(0);
+    assert_eq!(entries.len(), 2);
+    let record_ids: Vec<u64> = entries.iter().map(|(_, rid, _)| *rid).collect();
+    assert!(record_ids.contains(&1));
+    assert!(record_ids.contains(&2));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn overflow_reverse_index_multiple_records() {
+    let (mut table, dir) = create_test_table("rev_idx_multi");
+
+    for i in 1..=5u64 {
+        let text = "X".repeat(300 + i as usize * 50);
+        table
+            .insert_record(i, make_record(i as i64, &text))
+            .expect("insert failed");
+    }
+
+    assert_eq!(table.get_overflow_reverse().len(), 5);
+
+    // Delete record 3
+    table.delete_record(3).expect("delete failed");
+    assert_eq!(table.get_overflow_reverse().len(), 4);
+
+    // Verify record 3 is gone from reverse index
+    let entries = table.get_overflow_reverse().get_by_file(0);
+    let record_ids: Vec<u64> = entries.iter().map(|(_, rid, _)| *rid).collect();
+    assert!(!record_ids.contains(&3));
+
+    cleanup_dir(&dir);
+}
+
+// --- compact_overflow_file tests ---
+
+#[test]
+fn compact_overflow_reclaims_fragmented_space() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("compact_overflow_reclaim");
+
+    let text1 = "A".repeat(500);
+    let text2 = "B".repeat(300);
+    table.insert_record(1, make_record(1, &text1)).unwrap();
+    table.insert_record(2, make_record(2, &text2)).unwrap();
+
+    // Delete record 1 — 500 bytes become fragmented
+    table.delete_record(1).unwrap();
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    let header_before = read_overflow_header(&overflow_path).unwrap();
+    assert_eq!(header_before.get_fragmented_space(), 500);
+
+    // Compact — should eliminate fragmented space
+    table.compact_overflow_file(0).unwrap();
+
+    let header_after = read_overflow_header(&overflow_path).unwrap();
+    assert_eq!(header_after.get_fragmented_space(), 0);
+    // used_space should shrink: header(16) + 300 bytes only
+    assert_eq!(header_after.get_used_space(), 16 + 300);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_overflow_records_still_readable() {
+    let (mut table, dir) = create_test_table("compact_overflow_readable");
+
+    let text1 = "A".repeat(500);
+    let text2 = "B".repeat(300);
+    let text3 = "C".repeat(400);
+    table.insert_record(1, make_record(1, &text1)).unwrap();
+    table.insert_record(2, make_record(2, &text2)).unwrap();
+    table.insert_record(3, make_record(3, &text3)).unwrap();
+
+    // Delete record 2 to create fragmentation
+    table.delete_record(2).unwrap();
+
+    table.compact_overflow_file(0).unwrap();
+
+    // Records 1 and 3 should still be readable with correct data
+    let content1 = table.read_record(1).unwrap();
+    assert_eq!(content1.get_content()[1], ContentTypes::Text(text1));
+
+    let content3 = table.read_record(3).unwrap();
+    assert_eq!(content3.get_content()[1], ContentTypes::Text(text3));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_overflow_reverse_index_updated() {
+    let (mut table, dir) = create_test_table("compact_overflow_rev_idx");
+
+    let text1 = "A".repeat(500);
+    let text2 = "B".repeat(300);
+    table.insert_record(1, make_record(1, &text1)).unwrap();
+    table.insert_record(2, make_record(2, &text2)).unwrap();
+
+    table.delete_record(1).unwrap();
+    assert_eq!(table.get_overflow_reverse().len(), 1);
+
+    table.compact_overflow_file(0).unwrap();
+
+    // Reverse index should still have 1 entry with updated offset
+    assert_eq!(table.get_overflow_reverse().len(), 1);
+    let entries = table.get_overflow_reverse().get_by_file(0);
+    assert_eq!(entries.len(), 1);
+    // Should point to record 2
+    assert_eq!(entries[0].1, 2);
+    // Offset should be right after header (16)
+    assert_eq!(entries[0].0, 16);
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_overflow_no_fragmentation_is_noop() {
+    use young_bird_database::database_operations::file_processing::overflow::reading::read_overflow_header;
+
+    let (mut table, dir) = create_test_table("compact_overflow_noop");
+
+    let text = "A".repeat(500);
+    table.insert_record(1, make_record(1, &text)).unwrap();
+
+    let overflow_path = format!("{}/items_0.overflow", dir);
+    let header_before = read_overflow_header(&overflow_path).unwrap();
+
+    // Compact with no fragmentation
+    table.compact_overflow_file(0).unwrap();
+
+    let header_after = read_overflow_header(&overflow_path).unwrap();
+    assert_eq!(header_before.get_used_space(), header_after.get_used_space());
+
+    // Record still readable
+    let content = table.read_record(1).unwrap();
+    assert_eq!(content.get_content()[1], ContentTypes::Text(text));
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_overflow_empty_file_returns_ok() {
+    let (mut table, dir) = create_test_table("compact_overflow_empty");
+
+    // No overflow entries — should return Ok immediately
+    table.compact_overflow_file(0).unwrap();
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn compact_overflow_survives_reopen() {
+    let (mut table, dir) = create_test_table("compact_overflow_reopen");
+
+    let text1 = "A".repeat(500);
+    let text2 = "B".repeat(300);
+    table.insert_record(1, make_record(1, &text1)).unwrap();
+    table.insert_record(2, make_record(2, &text2)).unwrap();
+    table.delete_record(1).unwrap();
+
+    table.compact_overflow_file(0).unwrap();
+
+    // Reopen the table — reverse index rebuilt from pages
+    let table = Table::open("items".to_string(), dir.clone()).unwrap();
+
+    let content = table.read_record(2).unwrap();
+    assert_eq!(content.get_content()[1], ContentTypes::Text(text2));
+
+    assert_eq!(table.get_overflow_reverse().len(), 1);
 
     cleanup_dir(&dir);
 }
