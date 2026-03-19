@@ -1,3 +1,4 @@
+pub mod buffer_pool;
 pub mod errors;
 pub mod index;
 pub mod overflow;

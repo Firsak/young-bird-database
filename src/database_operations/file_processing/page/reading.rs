@@ -109,6 +109,75 @@ pub fn read_page(
     Ok(page)
 }
 
+/// Reads a full page including soft-deleted records. Unlike `read_page`, this
+/// preserves the on-disk slot layout so that slot indices from the hash index
+/// map directly to `records[slot_index]`. Used by the buffer pool cache.
+///
+/// # Arguments
+/// * `filename` - Path to the .dat file
+/// * `page_number` - Zero-indexed page within the file
+/// * `page_kbytes` - Page size in kilobytes
+pub fn read_page_all(
+    filename: &str,
+    page_number: u64,
+    page_kbytes: u32,
+) -> Result<Page, DatabaseError> {
+    let mut file = match OpenOptions::new().read(true).open(filename) {
+        Ok(file) => file,
+        Err(error) => {
+            println!("Error opening or creating the file {filename}: {error}");
+            return Err(DatabaseError::Io(error));
+        }
+    };
+
+    let page_size: usize = page_kbytes as usize * KBYTES;
+    let page_offset = offsets::page_start_offset(page_number, page_size);
+    let _ = match file.seek(SeekFrom::Start(page_offset)) {
+        Ok(pos) => pos,
+        Err(error) => {
+            println!("Error seeking in the file {filename}: {error}");
+            return Err(DatabaseError::Io(error));
+        }
+    };
+
+    let mut page_buffer: Vec<u8> = vec![0u8; page_size];
+
+    match file.read_exact(&mut page_buffer) {
+        Ok(_) => {}
+        Err(error) => {
+            println!("Error reading page {page_number} in {filename}: {error}");
+            return Err(DatabaseError::Io(error));
+        }
+    };
+
+    let header = PageHeader::from_bytes(&(page_buffer[0..HEADER_SIZE]))?;
+
+    let mut page = Page::new(
+        header,
+        Vec::new() as Vec<PageRecordMetadata>,
+        Vec::new() as Vec<PageRecordContent>,
+    );
+
+    for index in 0..page.header.get_records_count() {
+        let record_metadata_buffer_pos = HEADER_SIZE + index as usize * PAGE_RECORD_METADATA_SIZE;
+        let record_metadata = PageRecordMetadata::from_bytes(
+            &page_buffer[record_metadata_buffer_pos
+                ..record_metadata_buffer_pos + PAGE_RECORD_METADATA_SIZE],
+        )?;
+
+        let record_content_buffer_pos = record_metadata.get_content_offset() as usize;
+        let record_content_size = record_metadata.get_content_size() as usize;
+        let record_content = PageRecordContent::from_bytes(
+            &page_buffer[record_content_buffer_pos
+                ..record_content_buffer_pos + record_content_size],
+        )?;
+
+        page.append_record(record_metadata, record_content);
+    }
+
+    Ok(page)
+}
+
 /// Reads a single record's metadata by its slot index within the page.
 ///
 /// # Arguments

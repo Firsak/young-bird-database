@@ -45,15 +45,17 @@ pub struct Executor {
     pages_per_file: u32,
     page_kbytes: u32,
     overflow_kbytes: u32,
+    cache_size: usize,
 }
 
 impl Executor {
-    pub fn new(base_path: String, pages_per_file: u32, page_kbytes: u32, overflow_kbytes: u32) -> Self {
+    pub fn new(base_path: String, pages_per_file: u32, page_kbytes: u32, overflow_kbytes: u32, cache_size: usize) -> Self {
         Self {
             base_path,
             pages_per_file,
             page_kbytes,
             overflow_kbytes,
+            cache_size,
         }
     }
 
@@ -120,6 +122,7 @@ impl Executor {
             self.page_kbytes,
             self.overflow_kbytes,
             table_columns,
+            self.cache_size,
         )?;
         Ok(ExecuteResult::Created)
     }
@@ -180,6 +183,7 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
+            self.cache_size,
         )?;
         if values.len() != table.get_header().get_columns_count() as usize {
             return Err(DatabaseError::SchemaViolation(
@@ -196,6 +200,7 @@ impl Executor {
         }
         let record_content = PageRecordContent::new(content_values);
         let id = table.insert(record_content)?;
+        table.flush_all_dirty()?;
         Ok(ExecuteResult::Inserted { id })
     }
 
@@ -220,13 +225,14 @@ impl Executor {
         columns: SelectColumns,
         where_clause: Option<Expr>,
     ) -> Result<ExecuteResult, DatabaseError> {
-        let table = Table::open(
+        let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
+            self.cache_size,
         )?;
 
         // TODO: validate WHERE column names against schema before scanning
-        let column_defs = table.get_header().get_column_defs();
+        let column_defs = table.get_header().get_column_defs().clone();
         let column_def_names: Vec<String> = column_defs
             .iter()
             .map(|cd| cd.get_name().to_string())
@@ -241,14 +247,6 @@ impl Executor {
                 }
             }
         }
-        let columns_count = match &columns {
-            SelectColumns::All => column_defs.len() + 1,
-            SelectColumns::Named(names) => names.len(),
-        };
-        let records = table.scan_records(|record_id, values| match &where_clause {
-            None => true,
-            Some(expr) => evaluate_expr(expr, record_id, values, column_defs).unwrap_or(false),
-        })?;
         let column_names = match &columns {
             SelectColumns::All => {
                 let mut names: Vec<String> = column_defs
@@ -260,6 +258,14 @@ impl Executor {
             }
             SelectColumns::Named(names) => names.clone(),
         };
+        let columns_count = match &columns {
+            SelectColumns::All => column_defs.len() + 1,
+            SelectColumns::Named(names) => names.len(),
+        };
+        let records = table.scan_records(|record_id, values| match &where_clause {
+            None => true,
+            Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
+        })?;
         let rows = records
             .iter()
             .map(|record| {
@@ -315,18 +321,20 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
+            self.cache_size,
         )?;
         // TODO: validate WHERE column names against schema before scanning
         let ids_to_delete = {
-            let column_defs = table.get_header().get_column_defs();
+            let column_defs = table.get_header().get_column_defs().clone();
             table.scan_record_ids(|record_id, values| match &where_clause {
                 None => true,
-                Some(expr) => evaluate_expr(expr, record_id, values, column_defs).unwrap_or(false),
+                Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
             })?
         };
         for id in &ids_to_delete {
             table.delete_record(*id)?;
         }
+        table.flush_all_dirty()?;
         Ok(ExecuteResult::Deleted {
             count: ids_to_delete.len(),
         })
@@ -357,10 +365,11 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
+            self.cache_size,
         )?;
 
         // TODO: validate WHERE column names against schema before scanning
-        let column_defs = table.get_header().get_column_defs();
+        let column_defs = table.get_header().get_column_defs().clone();
 
         let column_def_names: Vec<String> = column_defs
             .iter()
@@ -396,7 +405,7 @@ impl Executor {
         let ids_to_update = {
             table.scan_record_ids(|record_id, values| match &where_clause {
                 None => true,
-                Some(expr) => evaluate_expr(expr, record_id, values, column_defs).unwrap_or(false),
+                Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
             })?
         };
 
@@ -414,6 +423,7 @@ impl Executor {
         }
 
         let count = ids_to_update.len();
+        table.flush_all_dirty()?;
 
         Ok(ExecuteResult::Updated { count })
     }

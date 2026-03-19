@@ -7,6 +7,8 @@ use young_bird_database::database_operations::file_processing::{
     types::{ColumnTypes, ContentTypes},
 };
 
+const TEST_CACHE_SIZE: usize = 16;
+
 /// Helper: generates a unique temp filename per test.
 fn temp_meta(test_name: &str) -> String {
     format!("test_integration_{}.meta", test_name)
@@ -18,8 +20,10 @@ fn cleanup(filename: &str) {
 }
 
 /// Helper: creates a unique temp directory for table tests and returns its path.
+/// Removes any leftover files from previous runs first.
 fn temp_dir(test_name: &str) -> String {
     let path = format!("test_table_{}", test_name);
+    fs::remove_dir_all(&path).ok();
     fs::create_dir_all(&path).ok();
     path
 }
@@ -131,6 +135,7 @@ fn create_table_produces_files() {
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
         ],
+        TEST_CACHE_SIZE,
     )
     .expect("Failed to create table");
 
@@ -151,6 +156,7 @@ fn create_table_invalid_pages_per_file() {
         8,
         1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+        TEST_CACHE_SIZE,
     );
 
     assert!(result.is_err());
@@ -171,11 +177,12 @@ fn create_and_open_table() {
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
         ],
+        TEST_CACHE_SIZE,
     )
     .expect("Can not create table");
 
     let table_read =
-        Table::open("products".to_string(), dir.clone()).expect("Can not read table");
+        Table::open("products".to_string(), dir.clone(), TEST_CACHE_SIZE).expect("Can not read table");
 
     assert_eq!(
         table.get_header().get_pages_count(),
@@ -196,7 +203,7 @@ fn create_and_open_table() {
 
 #[test]
 fn open_nonexistent_table() {
-    let result = Table::open("ghost".to_string(), "/tmp/no_such_dir".to_string());
+    let result = Table::open("ghost".to_string(), "/tmp/no_such_dir".to_string(), TEST_CACHE_SIZE);
     assert!(result.is_err());
 }
 
@@ -217,6 +224,7 @@ fn create_test_table(test_name: &str) -> (Table, String) {
             ColumnDef::new(ColumnTypes::Int64, false, "id".to_string()),
             ColumnDef::new(ColumnTypes::Text, true, "name".to_string()),
         ],
+        TEST_CACHE_SIZE,
     )
     .expect("Failed to create table");
     (table, dir)
@@ -238,10 +246,14 @@ fn insert_single_record() {
         .insert_record(1, make_record(1, "apple"))
         .expect("Failed to insert record");
 
-    // Read the first page and verify the record is there
+    // Verify through cache: record is readable
+    let content = table.read_record(1).expect("read from cache failed");
+    assert_eq!(content.get_content()[1], ContentTypes::Text("apple".to_string()));
+
+    // Flush and verify on disk
+    table.flush_all_dirty().expect("flush failed");
     let resolved = table.resolve_file(0).unwrap();
     let page = read_page(&resolved.filename, resolved.local_page_index, 8).unwrap();
-
     assert_eq!(page.header.get_records_count(), 1);
 
     cleanup_dir(&dir);
@@ -257,9 +269,16 @@ fn insert_multiple_records() {
             .expect("Failed to insert record");
     }
 
+    // Verify through cache
+    for i in 1..=5 {
+        let content = table.read_record(i).expect("read from cache failed");
+        assert_eq!(content.get_content()[1], ContentTypes::Text(format!("item_{}", i)));
+    }
+
+    // Flush and verify on disk
+    table.flush_all_dirty().expect("flush failed");
     let resolved = table.resolve_file(0).unwrap();
     let page = read_page(&resolved.filename, resolved.local_page_index, 8).unwrap();
-
     assert_eq!(page.header.get_records_count(), 5);
 
     cleanup_dir(&dir);
@@ -296,8 +315,11 @@ fn insert_and_reopen_table() {
         .insert_record(1, make_record(1, "persisted"))
         .expect("Failed to insert record");
 
+    // Flush dirty pages before reopening
+    table.flush_all_dirty().expect("flush failed");
+
     // Reopen the table from disk
-    let reopened = Table::open("items".to_string(), dir.clone())
+    let reopened = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE)
         .expect("Failed to reopen table");
 
     // The reopened table should see the same pages_count
@@ -331,7 +353,7 @@ fn insert_new_page_and_reopen() {
     assert!(pages_before > 1, "Should have created multiple pages");
 
     // Reopen and verify pages_count persisted
-    let reopened = Table::open("items".to_string(), dir.clone())
+    let reopened = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE)
         .expect("Failed to reopen table");
 
     assert_eq!(
@@ -727,6 +749,7 @@ fn create_with_zero_page_kbytes_rejected() {
         0, // zero page_kbytes
         1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject page_kbytes of 0");
     cleanup_dir(&dir);
@@ -742,6 +765,7 @@ fn create_with_empty_columns_rejected() {
         8,
         1024,
         vec![], // no columns
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject empty column list");
     cleanup_dir(&dir);
@@ -757,6 +781,7 @@ fn create_with_empty_table_name_rejected() {
         8,
         1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject empty table name");
     cleanup_dir(&dir);
@@ -772,6 +797,7 @@ fn create_with_whitespace_table_name_rejected() {
         8,
         1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject whitespace-only table name");
     cleanup_dir(&dir);
@@ -787,6 +813,7 @@ fn create_with_empty_column_name_rejected() {
         8,
         1024,
         vec![ColumnDef::new(ColumnTypes::Int64, false, "".to_string())],
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject empty column name");
     cleanup_dir(&dir);
@@ -797,6 +824,7 @@ fn open_with_empty_name_rejected() {
     let result = Table::open(
         "".to_string(),
         "/tmp".to_string(),
+        TEST_CACHE_SIZE,
     );
     assert!(result.is_err(), "Should reject empty table name on open");
 }
@@ -807,7 +835,7 @@ fn open_with_empty_name_rejected() {
 
 #[test]
 fn fragmentation_ratio_fresh_table() {
-    let (table, dir) = create_test_table("frag_fresh");
+    let (mut table, dir) = create_test_table("frag_fresh");
 
     // Fresh table: 1 page (last page) with no fragmented space → ratio 0.0
     let ratio = table.fragmentation_ratio().expect("Failed to get ratio");
@@ -1036,7 +1064,7 @@ fn compact_table_reopen_after_compact() {
     table.compact_table().expect("compact failed");
 
     // Reopen the table from disk
-    let reopened = Table::open("items".to_string(), dir.clone())
+    let mut reopened = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE)
         .expect("Failed to reopen after compact");
 
     // Records 5 and 6 should be readable from reopened table
@@ -1120,8 +1148,11 @@ fn insert_auto_increment_persists_across_reopen() {
     table.insert(make_record(1, "first")).expect("insert failed");
     table.insert(make_record(2, "second")).expect("insert failed");
 
+    // Flush dirty pages before reopening
+    table.flush_all_dirty().expect("flush failed");
+
     // Reopen the table from disk
-    let mut reopened = Table::open("items".to_string(), dir.clone())
+    let mut reopened = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE)
         .expect("reopen failed");
 
     let id = reopened
@@ -1688,9 +1719,12 @@ fn overflow_persists_across_reopen() {
         .insert_record(1, make_record(1, &big_text))
         .expect("insert failed");
 
+    // Flush dirty pages before reopening
+    table.flush_all_dirty().expect("flush failed");
+
     // Reopen the table from disk
-    let reopened =
-        Table::open("items".to_string(), dir.clone()).expect("reopen failed");
+    let mut reopened =
+        Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE).expect("reopen failed");
 
     let content = reopened.read_record(1).expect("read after reopen failed");
     assert_eq!(content.get_content()[1], ContentTypes::Text(big_text));
@@ -1730,6 +1764,7 @@ fn overflow_mixed_inline_and_overflow_columns() {
             ColumnDef::new(ColumnTypes::Text, false, "short_text".to_string()),
             ColumnDef::new(ColumnTypes::Text, false, "long_text".to_string()),
         ],
+        TEST_CACHE_SIZE,
     )
     .expect("create failed");
 
@@ -1894,8 +1929,11 @@ fn overflow_reverse_index_rebuilt_on_open() {
         .insert_record(2, make_record(2, &"Q".repeat(400)))
         .expect("insert failed");
 
+    // Flush dirty pages before reopening
+    table.flush_all_dirty().expect("flush failed");
+
     // Reopen — reverse index should be rebuilt from page scan
-    let reopened = Table::open("items".to_string(), dir.clone()).expect("reopen failed");
+    let reopened = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE).expect("reopen failed");
 
     let rev = reopened.get_overflow_reverse();
     assert_eq!(rev.len(), 2);
@@ -1949,6 +1987,8 @@ fn compact_overflow_reclaims_fragmented_space() {
 
     // Delete record 1 — 500 bytes become fragmented
     table.delete_record(1).unwrap();
+
+    table.flush_all_dirty().expect("flush failed");
 
     let overflow_path = format!("{}/items_0.overflow", dir);
     let header_before = read_overflow_header(&overflow_path).unwrap();
@@ -2026,9 +2066,10 @@ fn compact_overflow_no_fragmentation_is_noop() {
     let text = "A".repeat(500);
     table.insert_record(1, make_record(1, &text)).unwrap();
 
+    table.flush_all_dirty().expect("flush failed");
+
     let overflow_path = format!("{}/items_0.overflow", dir);
     let header_before = read_overflow_header(&overflow_path).unwrap();
-
     // Compact with no fragmentation
     table.compact_overflow_file(0).unwrap();
 
@@ -2065,7 +2106,7 @@ fn compact_overflow_survives_reopen() {
     table.compact_overflow_file(0).unwrap();
 
     // Reopen the table — reverse index rebuilt from pages
-    let table = Table::open("items".to_string(), dir.clone()).unwrap();
+    let mut table = Table::open("items".to_string(), dir.clone(), TEST_CACHE_SIZE).unwrap();
 
     let content = table.read_record(2).unwrap();
     assert_eq!(content.get_content()[1], ContentTypes::Text(text2));

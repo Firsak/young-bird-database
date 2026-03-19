@@ -1,6 +1,8 @@
 use std::usize;
 
 use super::table_header::TableHeader;
+use crate::database_operations::file_processing::buffer_pool::buffer_pool::BufferPool;
+use crate::database_operations::file_processing::buffer_pool::cached_page::CachedPage;
 use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::index::reading::read_index;
 use crate::database_operations::file_processing::index::writing::write_index;
@@ -14,14 +16,13 @@ use crate::database_operations::file_processing::page::header::PageHeader;
 use crate::database_operations::file_processing::page::offsets;
 use crate::database_operations::file_processing::page::page::Page;
 use crate::database_operations::file_processing::page::reading::{
-    read_page, read_page_header, read_record_content, read_record_metadata,
+    read_page, read_page_all, read_record_content, read_record_metadata,
 };
 use crate::database_operations::file_processing::page::record::{
     PageRecordContent, PageRecordMetadata,
 };
 use crate::database_operations::file_processing::page::writing::{
-    add_new_record, delete_record as page_delete_record, update_record as page_update_record,
-    write_new_page, write_page,
+    update_record as page_update_record, write_new_page, write_page,
 };
 use crate::database_operations::file_processing::table::reading::read_table_header;
 use crate::database_operations::file_processing::table::writing::write_table_header;
@@ -41,6 +42,7 @@ pub struct Table {
     header: TableHeader,
     index: HashIndex,
     overflow_reverse: OverflowReverseIndex,
+    cache: BufferPool,
 }
 
 /// Result of resolving a global page number: which file and which
@@ -58,6 +60,7 @@ impl Table {
         header: TableHeader,
         index: HashIndex,
         overflow_reverse: OverflowReverseIndex,
+        cache_size: usize,
     ) -> Self {
         Self {
             name,
@@ -65,6 +68,7 @@ impl Table {
             header,
             index,
             overflow_reverse,
+            cache: BufferPool::new(cache_size),
         }
     }
 
@@ -100,6 +104,123 @@ impl Table {
     /// Persists the current in-memory index to the .idx file.
     fn save_index(&self) -> Result<(), DatabaseError> {
         write_index(&self.idx_path(), &self.index)
+    }
+
+    /// Ensures a page is loaded into the buffer pool. On cache miss, reads the
+    /// full page (including deleted records) from disk. If eviction occurs and
+    /// the evicted page is dirty, flushes it to disk first.
+    ///
+    /// # Arguments
+    /// * `page_number` - Global page number to load
+    ///
+    /// # Errors
+    /// * `Io` - File read/write failure (loading or flushing evicted page)
+    /// * `InvalidArgument` - Invalid page number for resolve_file
+    fn ensure_page_loaded(&mut self, page_number: u64) -> Result<(), DatabaseError> {
+        if self.cache.get(page_number).is_some() {
+            return Ok(());
+        }
+
+        let resolve_file = self.resolve_file(page_number)?;
+
+        let page = read_page_all(
+            &resolve_file.filename,
+            resolve_file.local_page_index,
+            self.header.get_page_kbytes(),
+        )?;
+
+        let cache_res = self.cache.put(page_number, page);
+
+        if cache_res.is_none() {
+            return Ok(());
+        }
+
+        let (cached_page_number, cached_page_to_flush) = cache_res.unwrap();
+        if !cached_page_to_flush.dirty {
+            return Ok(());
+        }
+
+        let resolve_file_to_flush = self.resolve_file(cached_page_number)?;
+
+        write_page(
+            &resolve_file_to_flush.filename,
+            resolve_file_to_flush.local_page_index,
+            self.header.get_page_kbytes(),
+            &cached_page_to_flush.page,
+        )
+    }
+    /// Returns an immutable reference to a cached page. Loads from disk on cache miss.
+    ///
+    /// # Arguments
+    /// * `page_number` - Global page number to retrieve
+    ///
+    /// # Returns
+    /// Reference to the in-memory Page (including deleted records).
+    ///
+    /// # Errors
+    /// * `Io` - File read failure on cache miss
+    fn get_cached_page(&mut self, page_number: u64) -> Result<&Page, DatabaseError> {
+        self.ensure_page_loaded(page_number)?;
+        Ok(self.cache.get(page_number).unwrap())
+    }
+    /// Returns a mutable reference to a cached page. Loads from disk on cache miss.
+    /// The caller can modify the page and should call `mark_dirty()` on the result.
+    ///
+    /// # Arguments
+    /// * `page_number` - Global page number to retrieve
+    ///
+    /// # Returns
+    /// Mutable reference to the CachedPage (page data + dirty flag).
+    ///
+    /// # Errors
+    /// * `Io` - File read failure on cache miss
+    fn get_cached_page_mut(&mut self, page_number: u64) -> Result<&mut CachedPage, DatabaseError> {
+        self.ensure_page_loaded(page_number)?;
+        Ok(self.cache.get_mut(page_number).unwrap())
+    }
+    /// Flushes a single dirty cached page to disk. No-op if the page is clean.
+    ///
+    /// # Arguments
+    /// * `page_number` - Global page number to flush
+    ///
+    /// # Errors
+    /// * `InvalidArgument` - Page not found in cache
+    /// * `Io` - File write failure
+    fn flush_page(&mut self, page_number: u64) -> Result<(), DatabaseError> {
+        let resolved_file = self.resolve_file(page_number)?;
+        let c_page = self.cache.get_mut(page_number);
+        if c_page.is_none() {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "Page with number {} not found in cache",
+                { page_number }
+            )));
+        }
+
+        let c_page = c_page.unwrap();
+        if !c_page.dirty {
+            return Ok(());
+        }
+
+        write_page(
+            &resolved_file.filename,
+            resolved_file.local_page_index,
+            self.header.get_page_kbytes(),
+            &c_page.page,
+        )?;
+
+        c_page.dirty = false;
+        Ok(())
+    }
+    /// Flushes all dirty pages in the cache to disk.
+    ///
+    /// # Errors
+    /// * `Io` - File write failure on any page
+    pub fn flush_all_dirty(&mut self) -> Result<(), DatabaseError> {
+        let all_dirty = self.cache.dirty_page_numbers();
+        for page_number in all_dirty {
+            self.flush_page(page_number)?;
+        }
+        Ok(())
     }
 
     /// Rebuilds the overflow reverse index by scanning all pages.
@@ -139,7 +260,7 @@ impl Table {
     /// # Errors
     /// * `InvalidArgument` - Empty name
     /// * `Io` - .meta or .idx file doesn't exist or can't be read
-    pub fn open(name: String, base_path: String) -> Result<Self, DatabaseError> {
+    pub fn open(name: String, base_path: String, cache_size: usize) -> Result<Self, DatabaseError> {
         if name.trim().is_empty() {
             return Err(DatabaseError::InvalidArgument(
                 "Table name must not be empty".to_string(),
@@ -156,6 +277,7 @@ impl Table {
             header,
             index,
             overflow_reverse,
+            cache: BufferPool::new(cache_size),
         };
         table.rebuild_overflow_reverse()?;
         Ok(table)
@@ -170,6 +292,7 @@ impl Table {
     /// * `page_kbytes` - Page size in kilobytes (must be >= 1)
     /// * `overflow_kbytes` - Max size of each .overflow file in kilobytes (must be >= 1)
     /// * `columns` - Column definitions for the table schema (must have at least one)
+    /// * `cache_size` - Number of pages to hold in the buffer pool
     ///
     /// # Errors
     /// * `InvalidArgument` - Empty name, pages_per_file < 1, page_kbytes < 1, overflow_kbytes < 1, no columns, or empty column name
@@ -180,6 +303,7 @@ impl Table {
         page_kbytes: u32,
         overflow_kbytes: u32,
         columns: Vec<super::column_def::ColumnDef>,
+        cache_size: usize,
     ) -> Result<Self, DatabaseError> {
         if name.trim().is_empty() {
             return Err(DatabaseError::InvalidArgument(
@@ -225,7 +349,14 @@ impl Table {
         );
         let index = HashIndex::new(16);
         let overflow_reverse = OverflowReverseIndex::new();
-        let table = Table::new(name, base_path, table_header, index, overflow_reverse);
+        let table = Table::new(
+            name,
+            base_path,
+            table_header,
+            index,
+            overflow_reverse,
+            cache_size,
+        );
         table.save_header()?;
         write_new_page(&table.dat_path(0), 0, page_kbytes)?;
         table.save_index()?;
@@ -518,6 +649,7 @@ impl Table {
         }
 
         let page_kbytes = self.header.get_page_kbytes();
+        let page_size = page_kbytes as usize * KBYTES;
         let record_size = record_content.to_bytes().len() + PAGE_RECORD_METADATA_SIZE;
 
         if record_size + HEADER_SIZE > (page_kbytes as usize * KBYTES) {
@@ -525,41 +657,34 @@ impl Table {
         }
 
         let last_page_number = self.get_header().get_pages_count() - 1;
-        let last_page_filename = self.resolve_file(last_page_number)?;
 
-        let last_page_header = read_page_header(
-            &last_page_filename.filename,
-            last_page_filename.local_page_index,
-            page_kbytes,
-        )?;
+        let last_page = self.get_cached_page(last_page_number)?;
 
-        let (target_page_number, resolved_page) =
-            if last_page_header.get_free_space() < record_size as u32 {
-                let new_page_count = self.get_header().get_pages_count() + 1;
-                self.get_header_mut().update_pages_count(new_page_count);
-                self.save_header()?;
+        let target_page_number = if last_page.header.get_free_space() < record_size as u32 {
+            let new_page_count = self.get_header().get_pages_count() + 1;
+            self.get_header_mut().update_pages_count(new_page_count);
+            self.save_header()?;
 
-                let desired_page_number = last_page_number + 1;
-                let filename_for_desired_page = self.resolve_file(desired_page_number)?;
-                write_new_page(
-                    &filename_for_desired_page.filename,
-                    filename_for_desired_page.local_page_index,
-                    page_kbytes,
-                )?;
-                (desired_page_number, filename_for_desired_page)
-            } else {
-                (last_page_number, last_page_filename)
-            };
-        let slot_index = add_new_record(
-            &resolved_page.filename,
-            resolved_page.local_page_index,
-            page_kbytes,
-            record_id,
-            record_content,
-        )?;
+            let desired_page_number = last_page_number + 1;
+            let filename_for_desired_page = self.resolve_file(desired_page_number)?;
+            write_new_page(
+                &filename_for_desired_page.filename,
+                filename_for_desired_page.local_page_index,
+                page_kbytes,
+            )?;
+            desired_page_number
+        } else {
+            last_page_number
+        };
+
+        let last_page = self.get_cached_page_mut(target_page_number).unwrap();
+        last_page.mark_dirty();
+        let new_slot_index = last_page
+            .page
+            .add_record(page_size, record_id, record_content)?;
 
         self.index
-            .insert_entry(record_id, target_page_number, slot_index)?;
+            .insert_entry(record_id, target_page_number, new_slot_index)?;
         self.save_index()?;
 
         Ok(())
@@ -575,30 +700,24 @@ impl Table {
     ///
     /// # Errors
     /// * `RecordNotFound` - No record with this ID in the index
-    pub fn read_record(&self, record_id: u64) -> Result<PageRecordContent, DatabaseError> {
+    pub fn read_record(&mut self, record_id: u64) -> Result<PageRecordContent, DatabaseError> {
         let lookup = self.index.lookup(record_id);
-        if let Some(record_pos) = lookup {
-            let page_kbytes = self.header.get_page_kbytes();
-            let page_number = record_pos.0;
-            let slot_index = record_pos.1;
-            let resolved_filename = self.resolve_file(page_number)?;
-            let record_metadata = read_record_metadata(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                slot_index,
-                page_kbytes,
-            )?;
-            let mut record_content = read_record_content(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-                &record_metadata,
-            )?;
-            self.resolve_overflow_to_text(record_content.get_content_mut())?;
-            return Ok(record_content);
+
+        if lookup.is_none() {
+            return Err(DatabaseError::RecordNotFound(record_id));
         }
 
-        Err(DatabaseError::RecordNotFound(record_id))
+        let record_pos = lookup.unwrap();
+        let page_number = record_pos.0;
+        let slot_index = record_pos.1;
+
+        let page = self.get_cached_page(page_number)?;
+        let mut record_content = page
+            .get_record_content_by_slot_index(slot_index as usize)
+            .clone();
+
+        self.resolve_overflow_to_text(record_content.get_content_mut())?;
+        Ok(record_content)
     }
 
     /// Scans all records page-by-page, returning those that pass the filter.
@@ -611,21 +730,24 @@ impl Table {
     ///
     /// # Returns
     /// A Vec of `(record_id, PageRecordContent)` for all matching records.
-    pub fn scan_records<F>(&self, filter: F) -> Result<Vec<(u64, PageRecordContent)>, DatabaseError>
+    pub fn scan_records<F>(
+        &mut self,
+        filter: F,
+    ) -> Result<Vec<(u64, PageRecordContent)>, DatabaseError>
     where
         F: Fn(u64, &[ContentTypes]) -> bool,
     {
-        let page_kbytes = self.header.get_page_kbytes();
         let mut records: Vec<(u64, PageRecordContent)> = vec![];
         for page_number in 0..self.header.get_pages_count() {
-            let resolved_filename = self.resolve_file(page_number)?;
-            let page = read_page(
-                resolved_filename.filename.as_str(),
-                resolved_filename.local_page_index,
-                page_kbytes,
-            )?;
-            for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
-                let mut record_content = page.get_record_content_by_slot_index(index).clone();
+            let page = self.get_cached_page(page_number)?;
+            let records_metadata = page.get_records_metadata().clone();
+            let records_content = page.get_records_content().clone();
+
+            for (index, record_metadata) in records_metadata.iter().enumerate() {
+                if record_metadata.get_is_deleted() {
+                    continue;
+                }
+                let mut record_content = records_content[records_content.len() - 1 - index].clone();
                 self.resolve_overflow_to_text(record_content.get_content_mut())?;
                 if filter(record_metadata.get_id(), record_content.get_content()) {
                     records.push((record_metadata.get_id(), record_content));
@@ -645,21 +767,21 @@ impl Table {
     ///
     /// # Returns
     /// A Vec of record IDs for all matching records.
-    pub fn scan_record_ids<F>(&self, filter: F) -> Result<Vec<u64>, DatabaseError>
+    pub fn scan_record_ids<F>(&mut self, filter: F) -> Result<Vec<u64>, DatabaseError>
     where
         F: Fn(u64, &[ContentTypes]) -> bool,
     {
-        let page_kbytes = self.header.get_page_kbytes();
         let mut ids: Vec<u64> = vec![];
         for page_number in 0..self.header.get_pages_count() {
-            let resolved_filename = self.resolve_file(page_number)?;
-            let page = read_page(
-                resolved_filename.filename.as_str(),
-                resolved_filename.local_page_index,
-                page_kbytes,
-            )?;
-            for (index, record_metadata) in page.get_records_metadata().iter().enumerate() {
-                let mut record_content = page.get_record_content_by_slot_index(index).clone();
+            let page = self.get_cached_page(page_number)?;
+            let records_metadata = page.get_records_metadata().clone();
+            let records_content = page.get_records_content().clone();
+
+            for (index, record_metadata) in records_metadata.iter().enumerate() {
+                if record_metadata.get_is_deleted() {
+                    continue;
+                }
+                let mut record_content = records_content[records_content.len() - 1 - index].clone();
                 self.resolve_overflow_to_text(record_content.get_content_mut())?;
                 if filter(record_metadata.get_id(), record_content.get_content()) {
                     ids.push(record_metadata.get_id());
@@ -679,46 +801,36 @@ impl Table {
     /// * `RecordNotFound` - No record with this ID in the index
     pub fn delete_record(&mut self, record_id: u64) -> Result<(), DatabaseError> {
         let lookup = self.index.lookup(record_id);
-        if let Some(record_pos) = lookup {
-            let page_kbytes = self.header.get_page_kbytes();
-            let page_number = record_pos.0;
-            let slot_index = record_pos.1;
-            let resolved_filename = self.resolve_file(page_number)?;
-
-            // Read raw content before deleting to release overflow refs
-            let old_metadata = read_record_metadata(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                slot_index,
-                page_kbytes,
-            )?;
-            let old_content = read_record_content(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-                &old_metadata,
-            )?;
-            self.release_overflow_refs(old_content.get_content())?;
-
-            // Remove old overflow refs from reverse index
-            for value in old_content.get_content() {
-                if let ContentTypes::OverflowText(o_ref) = value {
-                    self.overflow_reverse
-                        .remove(o_ref.get_file_index(), o_ref.get_offset());
-                }
-            }
-
-            page_delete_record(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-                record_id,
-            )?;
-            self.index.remove_entry(record_id)?;
-            self.save_index()?;
-            return Ok(());
+        if lookup.is_none() {
+            return Err(DatabaseError::RecordNotFound(record_id));
         }
-        Err(DatabaseError::RecordNotFound(record_id))
+
+        let record_pos = lookup.unwrap();
+        let page_number = record_pos.0;
+        let slot_index = record_pos.1;
+
+        let c_page = self.get_cached_page_mut(page_number)?;
+        let old_content = c_page
+            .page
+            .get_record_content_by_slot_index(slot_index as usize)
+            .clone();
+
+        c_page.mark_dirty();
+        c_page.page.delete_record(slot_index)?;
+
+        self.release_overflow_refs(old_content.get_content())?;
+
+        // Remove old overflow refs from reverse index
+        for value in old_content.get_content() {
+            if let ContentTypes::OverflowText(o_ref) = value {
+                self.overflow_reverse
+                    .remove(o_ref.get_file_index(), o_ref.get_offset());
+            }
+        }
+
+        self.index.remove_entry(record_id)?;
+        self.save_index()?;
+        Ok(())
     }
 
     /// Updates a record's content by ID via index lookup.
@@ -740,85 +852,77 @@ impl Table {
         self.validate_record(&record_content)?;
 
         let lookup = self.index.lookup(record_id);
-        if let Some(record_pos) = lookup {
-            let page_kbytes = self.header.get_page_kbytes();
-            let page_number = record_pos.0;
-            let slot_index = record_pos.1;
-            let resolved_filename = self.resolve_file(page_number)?;
-
-            // Read old raw content for column-by-column overflow comparison
-            let old_metadata = read_record_metadata(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                slot_index,
-                page_kbytes,
-            )?;
-            let old_content = read_record_content(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-                &old_metadata,
-            )?;
-            // Remove old overflow refs from reverse index
-            for value in old_content.get_content() {
-                if let ContentTypes::OverflowText(o_ref) = value {
-                    self.overflow_reverse
-                        .remove(o_ref.get_file_index(), o_ref.get_offset());
-                }
-            }
-
-            self.convert_text_to_overflow_for_update(
-                old_content.get_content(),
-                record_content.get_content_mut(),
-            )?;
-
-            // Register new overflow refs in reverse index
-            for (col_idx, value) in record_content.get_content().iter().enumerate() {
-                if let ContentTypes::OverflowText(o_ref) = value {
-                    self.overflow_reverse.insert(
-                        o_ref.get_file_index(),
-                        o_ref.get_offset(),
-                        record_id,
-                        col_idx as u16,
-                    );
-                }
-            }
-
-            let update_result = page_update_record(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-                record_id,
-                record_content.clone(),
-            );
-            if let Err(error) = update_result {
-                match error {
-                    DatabaseError::RecordNotFound(_) => {
-                        return Err(DatabaseError::RecordNotFound(record_id))
-                    }
-                    DatabaseError::PageFull => {
-                        page_delete_record(
-                            &resolved_filename.filename,
-                            resolved_filename.local_page_index,
-                            page_kbytes,
-                            record_id,
-                        )?;
-                        self.index.remove_entry(record_id)?;
-                        self.save_index()?;
-                        self.insert_record(record_id, record_content)?;
-                        return Ok(());
-                    }
-                    _ => return Err(error),
-                }
-            }
-            return Ok(());
+        if lookup.is_none() {
+            return Err(DatabaseError::RecordNotFound(record_id));
         }
-        Err(DatabaseError::RecordNotFound(record_id))
+
+        let record_pos = lookup.unwrap();
+        let page_number = record_pos.0;
+        let slot_index = record_pos.1;
+
+        let old_content = self
+            .get_cached_page(page_number)?
+            .get_record_content_by_slot_index(slot_index as usize)
+            .clone();
+
+        // Remove old overflow refs from reverse index
+        for value in old_content.get_content() {
+            if let ContentTypes::OverflowText(o_ref) = value {
+                self.overflow_reverse
+                    .remove(o_ref.get_file_index(), o_ref.get_offset());
+            }
+        }
+
+        self.convert_text_to_overflow_for_update(
+            old_content.get_content(),
+            record_content.get_content_mut(),
+        )?;
+
+        // Register new overflow refs in reverse index
+        for (col_idx, value) in record_content.get_content().iter().enumerate() {
+            if let ContentTypes::OverflowText(o_ref) = value {
+                self.overflow_reverse.insert(
+                    o_ref.get_file_index(),
+                    o_ref.get_offset(),
+                    record_id,
+                    col_idx as u16,
+                );
+            }
+        }
+
+        let c_page = self.get_cached_page_mut(page_number)?;
+        c_page.mark_dirty();
+        let update_result = c_page
+            .page
+            .update_record(slot_index, record_content.clone());
+
+        if let Err(error) = update_result {
+            match error {
+                DatabaseError::RecordNotFound(_) => {
+                    return Err(DatabaseError::RecordNotFound(record_id))
+                }
+                DatabaseError::PageFull => {
+                    c_page.page.delete_record(slot_index)?;
+                    self.index.remove_entry(record_id)?;
+                    self.save_index()?;
+
+                    self.insert_record(record_id, record_content)?;
+                    return Ok(());
+                }
+                _ => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     /// Compacts the table by repacking all records into the minimum number of pages.
     /// Reads one source page at a time and builds target pages sequentially.
     /// Only 2 pages are held in memory at once (source + target).
+    ///
+    /// **Note:** This method bypasses the buffer pool cache — it reads/writes pages
+    /// via direct disk I/O. It flushes all dirty pages before starting and invalidates
+    /// the entire cache afterward. A future optimization could rewire it to operate
+    /// through the cache.
     ///
     /// # Algorithm
     /// 1. Stream records page by page, packing into target pages from page 0
@@ -828,6 +932,7 @@ impl Table {
     /// # Returns
     /// Number of pages freed by compaction.
     pub fn compact_table(&mut self) -> Result<u32, DatabaseError> {
+        self.flush_all_dirty()?;
         let page_kbytes = self.header.get_page_kbytes();
         let page_size = page_kbytes as usize * KBYTES;
         let total_pages = self.header.get_pages_count();
@@ -910,6 +1015,8 @@ impl Table {
         self.save_header()?;
         self.save_index()?;
 
+        self.cache = BufferPool::new(self.cache.capacity());
+
         Ok(pages_freed)
     }
 
@@ -925,23 +1032,17 @@ impl Table {
     /// The last page's `free_space` is excluded because `insert_record` appends to the last page,
     /// so that free space is growth room — not waste. Non-last pages' `free_space` is counted
     /// as wasted since new inserts never target them.
-    pub fn fragmentation_ratio(&self) -> Result<f64, DatabaseError> {
-        let page_kbytes = self.header.get_page_kbytes();
-        let page_size = page_kbytes as usize * KBYTES;
+    pub fn fragmentation_ratio(&mut self) -> Result<f64, DatabaseError> {
+        let page_size = self.header.get_page_kbytes() as usize * KBYTES;
         let page_capacity = (page_size - HEADER_SIZE) as u64;
         let total_pages = self.header.get_pages_count();
         let mut wasted: u64 = 0;
 
         for page_num in 0..total_pages {
-            let resolved_filename = self.resolve_file(page_num)?;
-            let header = read_page_header(
-                &resolved_filename.filename,
-                resolved_filename.local_page_index,
-                page_kbytes,
-            )?;
-            wasted += header.get_fragment_space() as u64;
+            let page = self.get_cached_page(page_num)?;
+            wasted += page.header.get_fragment_space() as u64;
             if page_num < total_pages - 1 {
-                wasted += header.get_free_space() as u64;
+                wasted += page.header.get_free_space() as u64;
             }
         }
 
@@ -954,6 +1055,11 @@ impl Table {
     /// Uses the reverse index to find live entries, reads each record to get
     /// the OverflowRef length, rewrites the file, then patches records with new refs.
     ///
+    /// **Note:** This method bypasses the buffer pool cache — it reads record data
+    /// and patches pages via direct disk I/O. It flushes all dirty pages before
+    /// starting and invalidates affected cached pages afterward. A future optimization
+    /// could rewire it to operate through the cache.
+    ///
     /// # Arguments
     /// * `file_index` - Which overflow file to compact (0-based)
     ///
@@ -961,6 +1067,7 @@ impl Table {
     /// * `RecordNotFound` - Reverse index references a record not in the hash index
     /// * `Io` - File system failure
     pub fn compact_overflow_file(&mut self, file_index: u32) -> Result<(), DatabaseError> {
+        self.flush_all_dirty()?;
         let filename = self.overflow_path(file_index);
         let page_kbytes = self.header.get_page_kbytes();
 
@@ -1005,6 +1112,8 @@ impl Table {
 
         let new_ref_map = rewrite_overflow_file(&filename, file_index, entries)?;
 
+        let mut invalidated_pages: Vec<u64> = vec![];
+
         for (offset, record_id, col_index) in live_entries {
             let (page_number, slot_index) =
                 self.index
@@ -1045,8 +1154,17 @@ impl Table {
                 record_content,
             )?;
 
+            if !invalidated_pages.contains(&page_number) {
+                invalidated_pages.push(page_number);
+            }
+
             self.overflow_reverse
                 .update_offset(file_index, offset, new_content_value.get_offset());
+        }
+
+        // Invalidate cached pages that were modified on disk by page_update_record
+        for page_number in invalidated_pages {
+            self.cache.remove(page_number);
         }
 
         Ok(())
@@ -1101,6 +1219,7 @@ mod tests {
             ),
             HashIndex::new(16),
             OverflowReverseIndex::new(),
+            16,
         )
     }
 

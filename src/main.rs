@@ -14,6 +14,7 @@ fn main() {
     let pages_per_file = 1000;
     let page_kbytes = 8;
     let overflow_kbytes = 1024;
+    let mut cache_size: usize = young_bird_database::database_operations::file_processing::buffer_pool::buffer_pool::DEFAULT_CACHE_SIZE;
 
     let interactive_mode = args.len() == 1;
 
@@ -34,6 +35,7 @@ fn main() {
                     println!("Options:");
                     println!("  --max-width <N>     Set column width limit for output");
                     println!("  --base-path <PATH>  Set data directory (default: data)");
+                    println!("  --cache-size <N>    Set buffer pool size in pages (default: 64)");
                     println!("  --help              Show this help message");
                     println!();
                     println!("If no SQL argument is provided, enters interactive REPL mode.");
@@ -68,6 +70,25 @@ fn main() {
                         }
                     };
                 }
+                s if s.as_str() == "--cache-size" => {
+                    index += 1;
+                    let string_value = match args.get(index) {
+                        Some(v) => v,
+                        None => {
+                            eprintln!("cache-size value not provided");
+                            std::process::exit(1);
+                        }
+                    };
+                    match string_value.parse::<usize>() {
+                        Ok(v) => {
+                            cache_size = v;
+                        }
+                        Err(error) => {
+                            eprintln!("provided cache-size value is not a valid number: {}", error);
+                            std::process::exit(1);
+                        }
+                    };
+                }
                 s => {
                     buffer = s.clone();
                 }
@@ -79,7 +100,7 @@ fn main() {
 
     std::fs::create_dir_all(base_path).unwrap();
 
-    let executor = Executor::new(base_path.to_string(), pages_per_file, page_kbytes, overflow_kbytes);
+    let executor = Executor::new(base_path.to_string(), pages_per_file, page_kbytes, overflow_kbytes, cache_size);
 
     if interactive_mode {
         loop {

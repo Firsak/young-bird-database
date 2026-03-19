@@ -88,8 +88,9 @@ pub fn write_new_page(
     }
 }
 
-/// Appends a new record to a page. Writes metadata after existing metadata slots
-/// and content at the end of the page growing backwards.
+/// Appends a new record to a page **via direct disk I/O**.
+/// Writes metadata after existing metadata slots and content at the end of
+/// the page growing backwards.
 ///
 /// # Arguments
 /// * `filename` - Path to the .dat file
@@ -234,7 +235,8 @@ fn find_record_metadata_by_id(
     Ok((found_record_metadata, found_slot_index))
 }
 
-/// Deletes a record by ID. Last record is hard-deleted (slot reclaimed, free_space increases).
+/// Deletes a record by ID **via direct disk I/O**.
+/// Last record is hard-deleted (slot reclaimed, free_space increases).
 /// Non-last records are soft-deleted (marked deleted, fragmented_space increases).
 ///
 /// # Arguments
@@ -315,8 +317,9 @@ pub fn delete_record(
     Ok(())
 }
 
-/// Updates a record's content by ID. If the new content fits in the old slot, it's written
-/// in place. If larger, the old space becomes fragmented and content is written at a new position.
+/// Updates a record's content by ID **via direct disk I/O**.
+/// If the new content fits in the old slot, it's written in place. If larger,
+/// the old space becomes fragmented and content is written at a new position.
 ///
 /// # Arguments
 /// * `filename` - Path to the .dat file
