@@ -9,6 +9,7 @@ A page-based database engine built from scratch in Rust with zero external depen
 - **Multi-file tables** — schema in `.meta`, pages in `_N.dat` files, hash index in `.idx`
 - **Overflow text** — large text values stored in separate `.overflow` files with fragmentation tracking and compaction
 - **Hash index** with open addressing and linear probing for O(1) record lookup by ID
+- **Buffer pool cache** — LRU page cache with write-back dirty tracking, configurable size via `--cache-size`
 - **Inter-page compaction** — streaming two-page algorithm with O(page_size) memory
 - **Full SQL pipeline** — Lexer → Parser (recursive descent) → Executor with WHERE clause support (AND/OR/NOT with precedence)
 - **Interactive REPL** and single-command CLI mode
@@ -42,6 +43,7 @@ Arguments:
 Options:
   --max-width <N>     Set column width limit for output
   --base-path <PATH>  Set data directory (default: data)
+  --cache-size <N>    Set buffer pool size in pages (default: 64)
   --help              Show this help message
 ```
 
@@ -98,12 +100,15 @@ src/
       errors.rs      # DatabaseError enum
       types.rs       # ContentTypes, ColumnTypes enums + serialization
       traits.rs      # BinarySerde, ReadWrite traits
+      buffer_pool/
+        cached_page.rs   # CachedPage (Page + dirty flag)
+        buffer_pool.rs   # BufferPool (LRU cache, HashMap + VecDeque)
       page/
         header.rs    # PageHeader (20 bytes)
         record.rs    # PageRecordMetadata, PageRecordContent
-        page.rs      # Page struct (header + metadata + content)
+        page.rs      # Page struct (header + metadata + content + in-memory mutations)
         offsets.rs   # Offset calculation helpers
-        reading.rs   # read_page, read_page_header, read_record_*
+        reading.rs   # read_page, read_page_all, read_page_header, read_record_*
         writing.rs   # write_page, write_new_page, add/delete/update, compact_page
       table/
         column_def.rs    # ColumnDef struct
@@ -141,7 +146,7 @@ tests/
 
 ## Test Coverage
 
-298 tests total (132 unit + 166 integration) covering serialization, page I/O, table CRUD, overflow text, index operations, SQL parsing, query execution, and CLI behavior.
+312 tests total (146 unit + 166 integration) covering serialization, page I/O, table CRUD, buffer pool caching, overflow text, index operations, SQL parsing, query execution, and CLI behavior.
 
 ```bash
 cargo test
@@ -149,7 +154,7 @@ cargo test
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–5, 6.1, and 7 are complete. Next up: B-Tree index (Phase 8) or page caching (Phase 6.2).
+See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–7 and 6.1–6.2 are complete. Next up: B-Tree index (Phase 8) or transaction support / WAL (Phase 6.3).
 
 ## License
 

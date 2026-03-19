@@ -49,11 +49,20 @@
 - In-memory reverse index for overflow entries (rebuilt on Table::open)
 - Overflow file compaction (rewrite with only live entries, patch records)
 
+### Phase 6.2: Page Caching (Buffer Pool)
+- BufferPool struct with LRU eviction (HashMap + VecDeque)
+- CachedPage with write-back dirty tracking
+- In-memory Page mutations (add_record, delete_record, update_record — no disk I/O)
+- read_page_all (includes deleted records for cache slot-index consistency)
+- Table CRUD and scan methods rewired through cache
+- Compaction: flush-before + cache-invalidate-after approach
+- CLI `--cache-size` flag with configurable buffer pool size
+
 ## Planned
 
 ### Phase 6: Advanced Features (continued)
-- Page caching (avoid re-reading pages from disk)
-- Transaction support (write-ahead log or similar)
+- Transaction support (write-ahead log)
+- SQL SET/GET commands for runtime config (e.g. cache_size)
 
 ### Phase 8: B-Tree Index
 - B-tree node struct (leaf + internal nodes, BinarySerde)
@@ -76,5 +85,6 @@ Page Layer (1)
         └─→ SQL Pipeline (7) — translates SQL into Table API calls
               └─→ B-Tree Index (8) — query planner uses B-tree for range queries
   └─→ Overflow Text (6.1) — large text in separate files with compaction
-  └─→ Advanced Features (6.2+) — caching, transactions
+  └─→ Page Caching (6.2) — LRU buffer pool with write-back dirty tracking
+  └─→ Advanced Features (6.3+) — transactions (WAL), concurrency control
 ```
