@@ -26,6 +26,12 @@ pub enum Statement {
     DropTable {
         table: String,
     },
+    /// Start an explicit transaction. Mutations won't flush until COMMIT.
+    Begin,
+    /// Commit the active transaction: fsync WAL, flush dirty pages, truncate WAL.
+    Commit,
+    /// Discard the active transaction: drop dirty pages without flushing.
+    Rollback,
 }
 
 /// Which columns a SELECT returns.

@@ -12,6 +12,7 @@ A page-based database engine built from scratch in Rust with zero external depen
 - **Buffer pool cache** — LRU page cache with write-back dirty tracking, configurable size via `--cache-size`
 - **Inter-page compaction** — streaming two-page algorithm with O(page_size) memory
 - **Full SQL pipeline** — Lexer → Parser (recursive descent) → Executor with WHERE clause support (AND/OR/NOT with precedence)
+- **Transaction support** — `BEGIN`/`COMMIT`/`ROLLBACK` with write-ahead log (WAL); crash recovery replays committed transactions on startup
 - **Interactive REPL** and single-command CLI mode
 
 ## Quick Start
@@ -57,6 +58,9 @@ SELECT * FROM t WHERE age > 18 AND name = 'alice'
 SELECT name, id FROM t WHERE id = 1
 UPDATE t SET age = 26 WHERE name = 'alice'
 DELETE FROM t WHERE age < 18
+BEGIN
+COMMIT
+ROLLBACK
 ```
 
 Supported types: `BOOLEAN`, `TEXT`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`, `FLOAT32`, `FLOAT64`
@@ -128,6 +132,10 @@ src/
         hash_index.rs    # HashIndex (open addressing, linear probing)
         reading.rs       # read_index (.idx file)
         writing.rs       # write_index (.idx file)
+      wal/
+        wal_entry.rs     # WalOperation enum + WalEntry (variable size)
+        wal_writer.rs    # WalWriter (append, fsync, truncate)
+        wal_reader.rs    # read_all (sequential WAL file reader)
     sql/
       token.rs           # Token types and SQL keywords
       lexer.rs           # SQL string → token stream
@@ -140,13 +148,14 @@ tests/
   index_operations.rs      # 4 index file I/O tests
   overflow_operations.rs   # 13 overflow file I/O tests
   sql_lexer.rs             # 13 SQL lexer tests
-  executor_operations.rs   # 24 SQL executor tests
+  executor_operations.rs   # 37 SQL executor + transaction tests
+  wal_operations.rs        # 7 WAL reader/writer tests
   cli_operations.rs        # 8 CLI integration tests
 ```
 
 ## Test Coverage
 
-312 tests total (146 unit + 166 integration) covering serialization, page I/O, table CRUD, buffer pool caching, overflow text, index operations, SQL parsing, query execution, and CLI behavior.
+346 tests total (160 unit + 186 integration) covering serialization, page I/O, table CRUD, buffer pool caching, overflow text, index operations, SQL parsing, query execution, transactions, crash recovery, and CLI behavior.
 
 ```bash
 cargo test
@@ -154,7 +163,7 @@ cargo test
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–7 and 6.1–6.2 are complete. Next up: B-Tree index (Phase 8) or transaction support / WAL (Phase 6.3).
+See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–7 and 6.1–6.3 are complete. Next up: B-Tree index (Phase 8) or SQL SET/GET config commands (Phase 6.4).
 
 ## License
 

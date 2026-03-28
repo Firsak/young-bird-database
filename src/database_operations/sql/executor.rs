@@ -8,12 +8,18 @@
 // The executor owns configuration (base_path, pages_per_file, page_kbytes, overflow_kbytes)
 // and opens/creates tables as needed per statement.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::page::record::PageRecordContent;
 use crate::database_operations::file_processing::table::{ColumnDef, Table};
+use crate::database_operations::file_processing::traits::BinarySerde;
 use crate::database_operations::file_processing::types::{
     self as storage_types, ColumnTypes, ContentTypes,
 };
+use crate::database_operations::file_processing::wal::wal_entry::{self, WalEntry, WalOperation};
+use crate::database_operations::file_processing::wal::wal_reader::read_all;
+use crate::database_operations::file_processing::wal::wal_writer::WalWriter;
 use crate::database_operations::sql::ast::{
     self as ast, CompOp, Expr, Literal, SelectColumns, Statement,
 };
@@ -26,17 +32,26 @@ pub enum ExecuteResult {
     /// DROP TABLE succeeded.
     Dropped,
     /// INSERT succeeded; contains the auto-assigned record ID.
-    Inserted { id: u64 },
+    Inserted {
+        id: u64,
+    },
     /// DELETE succeeded; contains the number of records deleted.
-    Deleted { count: usize },
+    Deleted {
+        count: usize,
+    },
     /// UPDATE succeeded; contains the number of records updated.
-    Updated { count: usize },
+    Updated {
+        count: usize,
+    },
     /// SELECT succeeded; contains column names and matching rows.
     /// Each row is a Vec<ContentTypes> where the first element is the `id` column.
     Selected {
         columns: Vec<String>,
         rows: Vec<Vec<ContentTypes>>,
     },
+    TransactionStarted,
+    Committed,
+    RolledBack,
 }
 
 /// SQL statement executor. Translates AST nodes into Table API calls.
@@ -46,17 +61,37 @@ pub struct Executor {
     page_kbytes: u32,
     overflow_kbytes: u32,
     cache_size: usize,
+    wal: WalWriter,
+    active_txn_id: Option<u64>,
+    next_txn_id: u64,
+    touched_tables: HashSet<String>,
+    opened_tables: HashMap<String, Table>,
 }
 
 impl Executor {
-    pub fn new(base_path: String, pages_per_file: u32, page_kbytes: u32, overflow_kbytes: u32, cache_size: usize) -> Self {
-        Self {
+    pub fn new(
+        base_path: String,
+        pages_per_file: u32,
+        page_kbytes: u32,
+        overflow_kbytes: u32,
+        cache_size: usize,
+        wal_path: String,
+    ) -> Result<Self, DatabaseError> {
+        let wal = WalWriter::new(wal_path.clone())?;
+        let mut executor = Self {
             base_path,
             pages_per_file,
             page_kbytes,
             overflow_kbytes,
             cache_size,
-        }
+            wal,
+            active_txn_id: None,
+            next_txn_id: 1,
+            touched_tables: HashSet::new(),
+            opened_tables: HashMap::new(),
+        };
+        executor.recover_from_wal(&wal_path)?;
+        Ok(executor)
     }
 
     /// Executes a parsed SQL statement and returns the result.
@@ -70,7 +105,7 @@ impl Executor {
     /// # Errors
     /// Returns `DatabaseError` on I/O failures, schema violations,
     /// missing tables, or invalid SQL semantics.
-    pub fn execute(&self, statement: Statement) -> Result<ExecuteResult, DatabaseError> {
+    pub fn execute(&mut self, statement: Statement) -> Result<ExecuteResult, DatabaseError> {
         match statement {
             Statement::CreateTable { table, columns } => self.execute_create_table(&table, columns),
             Statement::DropTable { table } => self.execute_drop_table(&table),
@@ -89,11 +124,108 @@ impl Executor {
                 assignments,
                 where_clause,
             } => self.execute_update(&table, assignments, where_clause),
+            Statement::Begin => self.execute_begin(),
+            Statement::Commit => self.execute_commit(),
+            Statement::Rollback => self.execute_rollback(),
         }
     }
 
-    /// Executes a CREATE TABLE statement.
+    /// Executes a BEGIN statement. Opens an explicit transaction.
     ///
+    /// Assigns a new transaction ID, appends a Begin entry to the WAL,
+    /// and sets `active_txn_id`. Mutations after this will not flush to
+    /// disk until COMMIT.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` if a transaction is already active.
+    fn execute_begin(&mut self) -> Result<ExecuteResult, DatabaseError> {
+        if self.active_txn_id.is_some() {
+            return Err(DatabaseError::InvalidArgument(
+                "Nested transactions are not supported".to_string(),
+            ));
+        }
+        self.active_txn_id = Some(self.next_txn_id);
+        let transaction_id = self.active_txn_id;
+        self.next_txn_id += 1;
+
+        self.wal.append(&WalEntry::new(
+            transaction_id.unwrap(),
+            WalOperation::Begin,
+            0,
+            "".to_string(),
+            vec![],
+        ))?;
+
+        Ok(ExecuteResult::TransactionStarted)
+    }
+
+    /// Executes a COMMIT statement. Durably persists the active transaction.
+    ///
+    /// 1. Appends Commit entry to the WAL.
+    /// 2. fsyncs the WAL (guarantees durability before touching pages).
+    /// 3. Flushes all dirty pages for touched tables.
+    /// 4. Truncates the WAL.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` if no transaction is active.
+    fn execute_commit(&mut self) -> Result<ExecuteResult, DatabaseError> {
+        if self.active_txn_id.is_none() {
+            return Err(DatabaseError::InvalidArgument(
+                "No transaction started".to_string(),
+            ));
+        }
+        self.wal.append(&WalEntry::new(
+            self.active_txn_id.unwrap(),
+            WalOperation::Commit,
+            0,
+            "".to_string(),
+            vec![],
+        ))?;
+        self.wal.fsync()?;
+
+        let table_names = self.touched_tables.clone();
+        for table_name in table_names {
+            let table = self.get_or_open_table(table_name.as_str())?;
+
+            table.flush_all_dirty()?;
+        }
+
+        self.wal.truncate()?;
+        self.active_txn_id = None;
+        self.touched_tables.clear();
+
+        Ok(ExecuteResult::Committed)
+    }
+
+    /// Executes a ROLLBACK statement. Discards the active transaction.
+    ///
+    /// Truncates the WAL and drops all touched tables from `opened_tables`.
+    /// Dropping the `Table` struct discards dirty buffer pool pages without
+    /// flushing — the redo-only WAL means uncommitted pages never reach disk.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` if no transaction is active.
+    fn execute_rollback(&mut self) -> Result<ExecuteResult, DatabaseError> {
+        if self.active_txn_id.is_none() {
+            return Err(DatabaseError::InvalidArgument(
+                "No transaction started".to_string(),
+            ));
+        }
+
+        self.wal.truncate()?;
+        self.active_txn_id = None;
+        let touched = self.touched_tables.clone();
+        self.touched_tables.clear();
+
+        for table_name in &touched {
+            self.opened_tables.remove(table_name);
+        }
+
+        Ok(ExecuteResult::RolledBack)
+    }
+
+    /// Executes a CREATE TABLE statement.
+    //
     /// SQL: `CREATE TABLE t (name TEXT, age INT32 NOT NULL)`
     ///
     /// Converts `Vec<ast::ColumnSpec>` → `Vec<ColumnDef>`, then calls `Table::create`
@@ -131,12 +263,18 @@ impl Executor {
     ///
     /// SQL: `DROP TABLE t`
     ///
-    /// Deletes `.meta`, `.idx`, and all `_N.dat` files. Silently ignores
-    /// files that are already missing (NotFound).
+    /// Deletes `.meta`, `.idx`, all `_N.dat` files, and all `_N.overflow` files.
+    /// Silently ignores files that are already missing (NotFound).
     ///
     /// # Returns
     /// `ExecuteResult::Dropped` on success.
-    fn execute_drop_table(&self, table_name: &str) -> Result<ExecuteResult, DatabaseError> {
+    fn execute_drop_table(&mut self, table_name: &str) -> Result<ExecuteResult, DatabaseError> {
+        if self.active_txn_id.is_some() {
+            return Err(DatabaseError::InvalidArgument(
+                "DROP TABLE cannot be used inside a transaction — COMMIT or ROLLBACK first"
+                    .to_string(),
+            ));
+        }
         let meta = format!("{}/{}.meta", self.base_path, table_name);
         let idx = format!("{}/{}.idx", self.base_path, table_name);
 
@@ -158,6 +296,19 @@ impl Executor {
             }
         }
 
+        // Delete .overflow files: _0.overflow, _1.overflow, ... until one doesn't exist
+        let mut file_index = 0u64;
+        loop {
+            let overflow = format!("{}/{}_{}.overflow", self.base_path, table_name, file_index);
+            match std::fs::remove_file(&overflow) {
+                Ok(_) => file_index += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => return Err(DatabaseError::Io(e)),
+            }
+        }
+
+        self.opened_tables.remove(table_name);
+
         Ok(ExecuteResult::Dropped)
     }
 
@@ -176,15 +327,13 @@ impl Executor {
     /// `SchemaViolation` if value count doesn't match column count, or if a
     /// literal can't be converted to the target column type.
     fn execute_insert(
-        &self,
+        &mut self,
         table_name: &str,
         values: Vec<Literal>,
     ) -> Result<ExecuteResult, DatabaseError> {
-        let mut table = Table::open(
-            table_name.to_string(),
-            self.base_path.clone(),
-            self.cache_size,
-        )?;
+        let transaction_id = self.active_txn_id.unwrap_or(self.next_txn_id);
+
+        let table = self.get_or_open_table(table_name)?;
         if values.len() != table.get_header().get_columns_count() as usize {
             return Err(DatabaseError::SchemaViolation(
                 "Provided Literals do not match with Column Definitions".to_string(),
@@ -199,8 +348,27 @@ impl Executor {
             content_values.push(converted_type);
         }
         let record_content = PageRecordContent::new(content_values);
-        let id = table.insert(record_content)?;
-        table.flush_all_dirty()?;
+        let id = table.insert(record_content.clone())?;
+
+        let wal_entry = WalEntry::new(
+            transaction_id,
+            wal_entry::WalOperation::Insert,
+            id,
+            table_name.to_string(),
+            record_content.to_bytes(),
+        );
+        self.wal.append(&wal_entry)?;
+
+        if self.active_txn_id.is_none() {
+            // auto-transaction: flush immediately, no tracking needed
+            let table = self.get_or_open_table(table_name)?;
+            table.flush_all_dirty()?;
+            self.wal.truncate()?;
+        } else {
+            // explicit transaction: track for later COMMIT
+            self.touched_tables.insert(table_name.to_string());
+        }
+
         Ok(ExecuteResult::Inserted { id })
     }
 
@@ -314,15 +482,13 @@ impl Executor {
     /// # Returns
     /// `ExecuteResult::Deleted { count }` with the number of records deleted.
     fn execute_delete(
-        &self,
+        &mut self,
         table_name: &str,
         where_clause: Option<Expr>,
     ) -> Result<ExecuteResult, DatabaseError> {
-        let mut table = Table::open(
-            table_name.to_string(),
-            self.base_path.clone(),
-            self.cache_size,
-        )?;
+        let transaction_id = self.active_txn_id.unwrap_or(self.next_txn_id);
+
+        let table = self.get_or_open_table(table_name)?;
         // TODO: validate WHERE column names against schema before scanning
         let ids_to_delete = {
             let column_defs = table.get_header().get_column_defs().clone();
@@ -331,10 +497,35 @@ impl Executor {
                 Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
             })?
         };
+
+        let mut wal_entries = vec![];
         for id in &ids_to_delete {
             table.delete_record(*id)?;
+
+            let wal_entry = WalEntry::new(
+                transaction_id,
+                wal_entry::WalOperation::Delete,
+                *id,
+                table_name.to_string(),
+                vec![],
+            );
+            wal_entries.push(wal_entry);
         }
-        table.flush_all_dirty()?;
+
+        for entry in &wal_entries {
+            self.wal.append(entry)?;
+        }
+
+        if self.active_txn_id.is_none() {
+            // auto-transaction: flush immediately, no tracking needed
+            let table = self.get_or_open_table(table_name)?;
+            table.flush_all_dirty()?;
+            self.wal.truncate()?;
+        } else {
+            // explicit transaction: track for later COMMIT
+            self.touched_tables.insert(table_name.to_string());
+        }
+
         Ok(ExecuteResult::Deleted {
             count: ids_to_delete.len(),
         })
@@ -357,16 +548,14 @@ impl Executor {
     /// `SchemaViolation` if an assignment column doesn't exist or the literal
     /// can't be converted to the column's type.
     fn execute_update(
-        &self,
+        &mut self,
         table_name: &str,
         assignments: Vec<ast::Assignment>,
         where_clause: Option<Expr>,
     ) -> Result<ExecuteResult, DatabaseError> {
-        let mut table = Table::open(
-            table_name.to_string(),
-            self.base_path.clone(),
-            self.cache_size,
-        )?;
+        let transaction_id = self.active_txn_id.unwrap_or(self.next_txn_id);
+
+        let table = self.get_or_open_table(table_name)?;
 
         // TODO: validate WHERE column names against schema before scanning
         let column_defs = table.get_header().get_column_defs().clone();
@@ -413,19 +602,156 @@ impl Executor {
             return Ok(ExecuteResult::Updated { count: 0 });
         }
 
+        let mut wal_entries = vec![];
         for record_id in &ids_to_update {
             let record = table.read_record(*record_id)?;
             let mut content = record.get_content().clone();
             for (index, position) in column_pos_to_update.iter().enumerate() {
                 content[*position] = column_values_to_update[index].clone();
             }
-            table.update_record(*record_id, PageRecordContent::new(content))?;
+            table.update_record(*record_id, PageRecordContent::new(content.clone()))?;
+
+            let wal_entry = WalEntry::new(
+                transaction_id,
+                wal_entry::WalOperation::Update,
+                *record_id,
+                table_name.to_string(),
+                PageRecordContent::new(content).to_bytes(),
+            );
+            wal_entries.push(wal_entry);
         }
 
         let count = ids_to_update.len();
-        table.flush_all_dirty()?;
+
+        for entry in &wal_entries {
+            self.wal.append(entry)?;
+        }
+
+        if self.active_txn_id.is_none() {
+            // auto-transaction: flush immediately, no tracking needed
+            let table = self.get_or_open_table(table_name)?;
+            table.flush_all_dirty()?;
+            self.wal.truncate()?;
+        } else {
+            // explicit transaction: track for later COMMIT
+            self.touched_tables.insert(table_name.to_string());
+        }
 
         Ok(ExecuteResult::Updated { count })
+    }
+
+    /// Returns a mutable reference to an open table, opening it if not already cached.
+    ///
+    /// Tables stay in `opened_tables` for the lifetime of the executor so that dirty
+    /// buffer pool pages persist across statements within a transaction.
+    fn get_or_open_table(&mut self, table_name: &str) -> Result<&mut Table, DatabaseError> {
+        if !self.opened_tables.contains_key(table_name) {
+            let table = Table::open(
+                table_name.to_string(),
+                self.base_path.clone(),
+                self.cache_size,
+            )?;
+            self.opened_tables.insert(table_name.to_string(), table);
+        }
+        Ok(self.opened_tables.get_mut(table_name).unwrap())
+    }
+
+    /// Replays committed transactions from the WAL file on startup.
+    ///
+    /// Reads all entries from `wal_path`, groups them by `transaction_id`, and
+    /// replays mutations for any group that contains a `Commit` entry. Groups
+    /// without a `Commit` (crashed mid-transaction) are silently skipped.
+    ///
+    /// Each mutation is idempotent:
+    /// - Insert: skipped if record already exists (already applied before crash)
+    /// - Delete/Update: skipped if record not found (already applied before crash)
+    ///
+    /// After replay, all touched tables are flushed and the WAL is truncated.
+    fn recover_from_wal(&mut self, wal_path: &str) -> Result<(), DatabaseError> {
+        let entries = read_all(wal_path)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut grouped_transactions: HashMap<u64, Vec<WalEntry>> = HashMap::new();
+        for entry in entries {
+            match grouped_transactions.get_mut(&entry.transaction_id) {
+                None => {
+                    grouped_transactions.insert(entry.transaction_id, vec![entry]);
+                }
+                Some(existing_entries) => {
+                    existing_entries.push(entry);
+                }
+            }
+        }
+
+        for (_transaction_id, entries) in grouped_transactions {
+            if let Some(entry) = entries.last() && entry.operation != WalOperation::Commit {continue;}
+
+            for entry in entries {
+                match entry.operation {
+                    WalOperation::Insert => {
+                        self.touched_tables.insert(entry.table_name.clone());
+                        let table = self.get_or_open_table(&entry.table_name)?;
+                        match table.read_record(entry.record_id) {
+                            Ok(_) => {
+                                continue;
+                            }
+                            Err(DatabaseError::RecordNotFound(_)) => {
+                                table.insert_record(
+                                    entry.record_id,
+                                    PageRecordContent::from_bytes(&entry.data)?,
+                                )?;
+                            }
+                            Err(e) => return Err(e),
+                        };
+                    }
+                    WalOperation::Update => {
+                        self.touched_tables.insert(entry.table_name.clone());
+                        let table = self.get_or_open_table(&entry.table_name)?;
+                        match table.read_record(entry.record_id) {
+                            Ok(_) => {
+                                table.update_record(
+                                    entry.record_id,
+                                    PageRecordContent::from_bytes(&entry.data)?,
+                                )?;
+                            }
+                            Err(DatabaseError::RecordNotFound(_)) => {
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        };
+                    }
+                    WalOperation::Delete => {
+                        self.touched_tables.insert(entry.table_name.clone());
+                        let table = self.get_or_open_table(&entry.table_name)?;
+                        match table.read_record(entry.record_id) {
+                            Ok(_) => {
+                                table.delete_record(entry.record_id)?;
+                            }
+                            Err(DatabaseError::RecordNotFound(_)) => {
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        };
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let table_names = self.touched_tables.clone();
+        for table_name in table_names {
+            let table = self.get_or_open_table(table_name.as_str())?;
+            table.flush_all_dirty()?;
+        }
+        self.touched_tables.clear();
+
+        self.wal.truncate()?;
+
+        Ok(())
     }
 }
 
@@ -863,7 +1189,9 @@ fn content_type_string(value: &ContentTypes) -> String {
         ContentTypes::UInt64(v) => v.to_string(),
         ContentTypes::Float32(v) => v.to_string(),
         ContentTypes::Float64(v) => v.to_string(),
-        ContentTypes::OverflowText(_) => unreachable!("OverflowText should be resolved by Table before reaching executor"),
+        ContentTypes::OverflowText(_) => {
+            unreachable!("OverflowText should be resolved by Table before reaching executor")
+        }
     }
 }
 
@@ -960,6 +1288,9 @@ pub fn pretty_result_print(result: ExecuteResult, max_width: Option<usize>) -> S
 
             lines_list.join("\n")
         }
+        ExecuteResult::TransactionStarted => "Transaction started".to_string(),
+        ExecuteResult::Committed => "Transaction commited".to_string(),
+        ExecuteResult::RolledBack => "Transaction rolled back".to_string(),
     }
 }
 
@@ -1038,8 +1369,14 @@ mod tests {
 
     #[test]
     fn pretty_print_simple_variants() {
-        assert_eq!(pretty_result_print(ExecuteResult::Created, None), "Table created");
-        assert_eq!(pretty_result_print(ExecuteResult::Dropped, None), "Table dropped");
+        assert_eq!(
+            pretty_result_print(ExecuteResult::Created, None),
+            "Table created"
+        );
+        assert_eq!(
+            pretty_result_print(ExecuteResult::Dropped, None),
+            "Table dropped"
+        );
         assert_eq!(
             pretty_result_print(ExecuteResult::Inserted { id: 5 }, None),
             "Inserted record id=5"
@@ -1099,12 +1436,30 @@ mod tests {
 
     #[test]
     fn column_type_conversion_all_types() {
-        assert_eq!(column_type_to_storage(&ast::ColumnType::Boolean), storage_types::ColumnTypes::Boolean);
-        assert_eq!(column_type_to_storage(&ast::ColumnType::Text), storage_types::ColumnTypes::Text);
-        assert_eq!(column_type_to_storage(&ast::ColumnType::Int8), storage_types::ColumnTypes::Int8);
-        assert_eq!(column_type_to_storage(&ast::ColumnType::Int64), storage_types::ColumnTypes::Int64);
-        assert_eq!(column_type_to_storage(&ast::ColumnType::UInt64), storage_types::ColumnTypes::UInt64);
-        assert_eq!(column_type_to_storage(&ast::ColumnType::Float64), storage_types::ColumnTypes::Float64);
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::Boolean),
+            storage_types::ColumnTypes::Boolean
+        );
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::Text),
+            storage_types::ColumnTypes::Text
+        );
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::Int8),
+            storage_types::ColumnTypes::Int8
+        );
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::Int64),
+            storage_types::ColumnTypes::Int64
+        );
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::UInt64),
+            storage_types::ColumnTypes::UInt64
+        );
+        assert_eq!(
+            column_type_to_storage(&ast::ColumnType::Float64),
+            storage_types::ColumnTypes::Float64
+        );
     }
 
     // ── literal_to_content_type tests ────────────────────────────
@@ -1123,7 +1478,8 @@ mod tests {
 
     #[test]
     fn literal_type_mismatch_rejected() {
-        let result = literal_to_content_type(&Literal::Str("hello".to_string()), &ColumnTypes::Int64);
+        let result =
+            literal_to_content_type(&Literal::Str("hello".to_string()), &ColumnTypes::Int64);
         assert!(result.is_err());
     }
 }

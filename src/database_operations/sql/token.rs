@@ -9,6 +9,9 @@ pub enum Keyword {
     Create,
     Drop,
     Table,
+    Begin,
+    Commit,
+    Rollback,
 
     // Clause words
     From,
@@ -52,6 +55,9 @@ impl Keyword {
             "CREATE" => Some(Keyword::Create),
             "DROP" => Some(Keyword::Drop),
             "TABLE" => Some(Keyword::Table),
+            "BEGIN" => Some(Keyword::Begin),
+            "COMMIT" => Some(Keyword::Commit),
+            "ROLLBACK" => Some(Keyword::Rollback),
 
             // Clauses
             "FROM" => Some(Keyword::From),

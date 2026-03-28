@@ -58,10 +58,16 @@
 - Compaction: flush-before + cache-invalidate-after approach
 - CLI `--cache-size` flag with configurable buffer pool size
 
+### Phase 6.3: Transaction Support (Write-Ahead Log)
+- WAL module: WalEntry with binary layout (entry_size prefix + txn_id + op + rid + table_name + data), WalWriter (append/fsync/truncate), WalReader (read_all with read_at)
+- `BEGIN` / `COMMIT` / `ROLLBACK` SQL statements
+- Executor WAL integration: log before mutate; dirty pages only flush on COMMIT
+- Auto-transaction for single statements without explicit BEGIN
+- Crash recovery: replay committed transactions idempotently on startup, discard incomplete ones
+
 ## Planned
 
 ### Phase 6: Advanced Features (continued)
-- Transaction support (write-ahead log)
 - SQL SET/GET commands for runtime config (e.g. cache_size)
 
 ### Phase 8: B-Tree Index
@@ -86,5 +92,6 @@ Page Layer (1)
               └─→ B-Tree Index (8) — query planner uses B-tree for range queries
   └─→ Overflow Text (6.1) — large text in separate files with compaction
   └─→ Page Caching (6.2) — LRU buffer pool with write-back dirty tracking
-  └─→ Advanced Features (6.3+) — transactions (WAL), concurrency control
+  └─→ Transactions / WAL (6.3) — log before mutate, COMMIT flushes, ROLLBACK discards
+  └─→ Advanced Features (6.4+) — SQL SET/GET config, concurrency control
 ```

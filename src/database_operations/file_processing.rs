@@ -6,6 +6,7 @@ pub mod page;
 pub mod table;
 pub mod traits;
 pub mod types;
+pub mod wal;
 
 pub const KBYTES: usize = 1024;
 pub(crate) const HEADER_SIZE: usize = 20;

@@ -30,7 +30,9 @@ fn main() {
                     println!("Usage: young_bird_database [OPTIONS] [SQL]");
                     println!();
                     println!("Arguments:");
-                    println!("  [SQL]               SQL statement to execute (non-interactive mode)");
+                    println!(
+                        "  [SQL]               SQL statement to execute (non-interactive mode)"
+                    );
                     println!();
                     println!("Options:");
                     println!("  --max-width <N>     Set column width limit for output");
@@ -100,7 +102,15 @@ fn main() {
 
     std::fs::create_dir_all(base_path).unwrap();
 
-    let executor = Executor::new(base_path.to_string(), pages_per_file, page_kbytes, overflow_kbytes, cache_size);
+    let wal_path = format!("{}/database.wal", base_path);
+    let mut executor = Executor::new(
+        base_path.to_string(),
+        pages_per_file,
+        page_kbytes,
+        overflow_kbytes,
+        cache_size,
+        wal_path,
+    ).unwrap();
 
     if interactive_mode {
         loop {
@@ -130,7 +140,7 @@ fn main() {
                 continue;
             }
 
-            let res = match process_execution(&executor, input) {
+            let res = match process_execution(&mut executor, input) {
                 Ok(value) => value,
                 Err(error) => {
                     println!("{}", error);
@@ -148,7 +158,7 @@ fn main() {
             std::process::exit(1);
         }
 
-        let res = match process_execution(&executor, input) {
+        let res = match process_execution(&mut executor, input) {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("{}", error);
@@ -160,7 +170,7 @@ fn main() {
     }
 }
 
-fn process_execution(executor: &Executor, input: &str) -> Result<ExecuteResult, String> {
+fn process_execution(executor: &mut Executor, input: &str) -> Result<ExecuteResult, String> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer
         .tokenize()

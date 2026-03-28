@@ -92,7 +92,10 @@ impl Parser {
                 Keyword::Delete => self.parse_delete(),
                 Keyword::Update => self.parse_update(),
                 Keyword::Create => self.parse_create_table(),
-                _ => Err("Starting token should be one of the statement tokens: SELECT, INSERT, DROP, DELETE, UPDATE, CREATE".to_string())
+                Keyword::Begin => self.parse_begin(),
+                Keyword::Commit => self.parse_commit(),
+                Keyword::Rollback => self.parse_rollback(),
+                _ => Err("Starting token should be one of the statement tokens: SELECT, INSERT, DROP, DELETE, UPDATE, CREATE, BEGIN, COMMIT, ROLLBACK".to_string())
             },
             _ => Err("No tokens found while parsing".to_string()),
         }?;
@@ -103,6 +106,24 @@ impl Parser {
             return Err("Unexpected tokens after statement".to_string());
         }
         Ok(statement)
+    }
+
+    /// Parse `BEGIN` — no arguments.
+    fn parse_begin(&mut self) -> Result<Statement, String> {
+        self.expect_keyword(Keyword::Begin)?;
+        Ok(Statement::Begin)
+    }
+
+    /// Parse `COMMIT` — no arguments.
+    fn parse_commit(&mut self) -> Result<Statement, String> {
+        self.expect_keyword(Keyword::Commit)?;
+        Ok(Statement::Commit)
+    }
+
+    /// Parse `ROLLBACK` — no arguments.
+    fn parse_rollback(&mut self) -> Result<Statement, String> {
+        self.expect_keyword(Keyword::Rollback)?;
+        Ok(Statement::Rollback)
     }
 
     // CREATE TABLE name (col1 TYPE, col2 TYPE NOT NULL, ...)
