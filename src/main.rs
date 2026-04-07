@@ -1,3 +1,4 @@
+use young_bird_database::database_operations::file_processing::config::DatabaseConfig;
 use young_bird_database::database_operations::sql::executor::{
     pretty_result_print, ExecuteResult, Executor,
 };
@@ -11,10 +12,7 @@ fn main() {
     let mut max_width: Option<usize> = None;
     let mut buffer = String::new();
     let mut base_path = "data";
-    let pages_per_file = 1000;
-    let page_kbytes = 8;
-    let overflow_kbytes = 1024;
-    let mut cache_size: usize = young_bird_database::database_operations::file_processing::buffer_pool::buffer_pool::DEFAULT_CACHE_SIZE;
+    let mut cache_size_override: Option<usize> = None;
 
     let interactive_mode = args.len() == 1;
 
@@ -83,7 +81,7 @@ fn main() {
                     };
                     match string_value.parse::<usize>() {
                         Ok(v) => {
-                            cache_size = v;
+                            cache_size_override = Some(v);
                         }
                         Err(error) => {
                             eprintln!("provided cache-size value is not a valid number: {}", error);
@@ -102,13 +100,15 @@ fn main() {
 
     std::fs::create_dir_all(base_path).unwrap();
 
+    let mut config = DatabaseConfig::read_from_file(&DatabaseConfig::config_path(base_path)).unwrap();
+    if let Some(v) = cache_size_override {
+        config.cache_size = v;
+    }
+
     let wal_path = format!("{}/database.wal", base_path);
     let mut executor = Executor::new(
         base_path.to_string(),
-        pages_per_file,
-        page_kbytes,
-        overflow_kbytes,
-        cache_size,
+        config,
         wal_path,
     ).unwrap();
 

@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::database_operations::file_processing::config::DatabaseConfig;
 use crate::database_operations::file_processing::errors::DatabaseError;
 use crate::database_operations::file_processing::page::record::PageRecordContent;
 use crate::database_operations::file_processing::table::{ColumnDef, Table};
@@ -52,15 +53,20 @@ pub enum ExecuteResult {
     TransactionStarted,
     Committed,
     RolledBack,
+    ConfigUpdated,
+    ConfigValue {
+        key: String,
+        value: String,
+    },
+    ConfigAll {
+        entries: Vec<(String, String)>,
+    },
 }
 
 /// SQL statement executor. Translates AST nodes into Table API calls.
 pub struct Executor {
     base_path: String,
-    pages_per_file: u32,
-    page_kbytes: u32,
-    overflow_kbytes: u32,
-    cache_size: usize,
+    config: DatabaseConfig,
     wal: WalWriter,
     active_txn_id: Option<u64>,
     next_txn_id: u64,
@@ -71,19 +77,13 @@ pub struct Executor {
 impl Executor {
     pub fn new(
         base_path: String,
-        pages_per_file: u32,
-        page_kbytes: u32,
-        overflow_kbytes: u32,
-        cache_size: usize,
+        config: DatabaseConfig,
         wal_path: String,
     ) -> Result<Self, DatabaseError> {
         let wal = WalWriter::new(wal_path.clone())?;
         let mut executor = Self {
             base_path,
-            pages_per_file,
-            page_kbytes,
-            overflow_kbytes,
-            cache_size,
+            config,
             wal,
             active_txn_id: None,
             next_txn_id: 1,
@@ -127,6 +127,8 @@ impl Executor {
             Statement::Begin => self.execute_begin(),
             Statement::Commit => self.execute_commit(),
             Statement::Rollback => self.execute_rollback(),
+            Statement::Get { key } => self.execute_get(key),
+            Statement::Set { key, value } => self.execute_set(key, value),
         }
     }
 
@@ -250,11 +252,11 @@ impl Executor {
         Table::create(
             table_name.to_string(),
             self.base_path.clone(),
-            self.pages_per_file,
-            self.page_kbytes,
-            self.overflow_kbytes,
+            self.config.pages_per_file,
+            self.config.page_kbytes,
+            self.config.overflow_kbytes,
             table_columns,
-            self.cache_size,
+            self.config.cache_size,
         )?;
         Ok(ExecuteResult::Created)
     }
@@ -396,7 +398,7 @@ impl Executor {
         let mut table = Table::open(
             table_name.to_string(),
             self.base_path.clone(),
-            self.cache_size,
+            self.config.cache_size,
         )?;
 
         // TODO: validate WHERE column names against schema before scanning
@@ -640,6 +642,37 @@ impl Executor {
         Ok(ExecuteResult::Updated { count })
     }
 
+    fn execute_get(&self, key: Option<String>) -> Result<ExecuteResult, DatabaseError> {
+        match key {
+            None => {
+                let entries = self.config.get_all();
+                Ok(ExecuteResult::ConfigAll { entries })
+            }
+            Some(name) => {
+                let entry = self.config.get(&name)?;
+                Ok(ExecuteResult::ConfigValue {
+                    key: name,
+                    value: entry,
+                })
+            }
+        }
+    }
+
+    fn execute_set(&mut self, key: String, value: Literal) -> Result<ExecuteResult, DatabaseError> {
+        let num = if let Literal::Integer(num) = value {
+            num
+        } else {
+            return Err(DatabaseError::InvalidArgument(
+                "SET should use integer".to_string(),
+            ));
+        };
+
+        self.config.set(&key, num as usize)?;
+        self.config.write_to_file(&DatabaseConfig::config_path(&self.base_path))?;
+
+        Ok(ExecuteResult::ConfigUpdated)
+    }
+
     /// Returns a mutable reference to an open table, opening it if not already cached.
     ///
     /// Tables stay in `opened_tables` for the lifetime of the executor so that dirty
@@ -649,7 +682,7 @@ impl Executor {
             let table = Table::open(
                 table_name.to_string(),
                 self.base_path.clone(),
-                self.cache_size,
+                self.config.cache_size,
             )?;
             self.opened_tables.insert(table_name.to_string(), table);
         }
@@ -1291,6 +1324,17 @@ pub fn pretty_result_print(result: ExecuteResult, max_width: Option<usize>) -> S
         ExecuteResult::TransactionStarted => "Transaction started".to_string(),
         ExecuteResult::Committed => "Transaction commited".to_string(),
         ExecuteResult::RolledBack => "Transaction rolled back".to_string(),
+        ExecuteResult::ConfigUpdated => "Config updated".to_string(),
+        ExecuteResult::ConfigAll { entries } => {
+            let mut output = "Config values:\n".to_string();
+            for entry in entries {
+                output.push_str(format!("{} = {}\n", entry.0, entry.1).as_str());
+            }
+            output
+        }
+        ExecuteResult::ConfigValue { key, value } => {
+            format!("{} = {}", key, value)
+        }
     }
 }
 

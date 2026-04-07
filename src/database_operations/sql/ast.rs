@@ -32,6 +32,13 @@ pub enum Statement {
     Commit,
     /// Discard the active transaction: drop dirty pages without flushing.
     Rollback,
+    Get {
+        key: Option<String>,
+    },
+    Set {
+        key: String,
+        value: Literal,
+    },
 }
 
 /// Which columns a SELECT returns.

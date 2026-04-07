@@ -12,6 +12,7 @@ pub enum Keyword {
     Begin,
     Commit,
     Rollback,
+    Get,
 
     // Clause words
     From,
@@ -58,6 +59,7 @@ impl Keyword {
             "BEGIN" => Some(Keyword::Begin),
             "COMMIT" => Some(Keyword::Commit),
             "ROLLBACK" => Some(Keyword::Rollback),
+            "GET" => Some(Keyword::Get),
 
             // Clauses
             "FROM" => Some(Keyword::From),

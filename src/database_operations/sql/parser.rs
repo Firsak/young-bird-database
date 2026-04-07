@@ -95,6 +95,8 @@ impl Parser {
                 Keyword::Begin => self.parse_begin(),
                 Keyword::Commit => self.parse_commit(),
                 Keyword::Rollback => self.parse_rollback(),
+                Keyword::Get => self.parse_get(),
+                Keyword::Set => self.parse_set(),
                 _ => Err("Starting token should be one of the statement tokens: SELECT, INSERT, DROP, DELETE, UPDATE, CREATE, BEGIN, COMMIT, ROLLBACK".to_string())
             },
             _ => Err("No tokens found while parsing".to_string()),
@@ -425,6 +427,25 @@ impl Parser {
             None => Err("No token found".to_string()),
             _ => Err("Unexpected token, should be Literal".to_string()),
         }
+    }
+
+    fn parse_get(&mut self) -> Result<Statement, String> {
+        self.expect_keyword(Keyword::Get)?;
+        let param = self.expect_identifier()?;
+        let key = if param.to_uppercase().eq("ALL") {
+            None
+        } else {
+            Some(param)
+        };
+        Ok(Statement::Get { key })
+    }
+
+    fn parse_set(&mut self) -> Result<Statement, String> {
+        self.expect_keyword(Keyword::Set)?;
+        let param = self.expect_identifier()?;
+        self.expect_token(&Token::Equals)?;
+        let value = self.parse_literal()?;
+        Ok(Statement::Set { key: param, value })
     }
 }
 

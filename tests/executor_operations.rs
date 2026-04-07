@@ -4,9 +4,19 @@ use young_bird_database::database_operations::file_processing::types::ContentTyp
 use young_bird_database::database_operations::sql::ast::{
     Assignment, ColumnSpec, ColumnType, CompOp, Expr, Literal, SelectColumns, Statement,
 };
+use young_bird_database::database_operations::file_processing::config::DatabaseConfig;
 use young_bird_database::database_operations::sql::executor::{ExecuteResult, Executor};
 
 const TEST_CACHE_SIZE: usize = 16;
+
+fn test_config() -> DatabaseConfig {
+    DatabaseConfig {
+        cache_size: TEST_CACHE_SIZE,
+        pages_per_file: 100,
+        page_kbytes: 8,
+        overflow_kbytes: 1024,
+    }
+}
 
 fn temp_dir(test_name: &str) -> String {
     let path = format!("test_executor_{}", test_name);
@@ -60,7 +70,7 @@ fn insert_record(executor: &mut Executor, table_name: &str, age: u64, name: &str
 #[test]
 fn create_table_basic() {
     let dir = temp_dir("create_basic");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     let result = executor
         .execute(Statement::CreateTable {
             table: "items".to_string(),
@@ -99,7 +109,7 @@ fn create_table_basic() {
 #[test]
 fn create_table_duplicate_name() {
     let dir = temp_dir("create_dup");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     // Creating same table again should fail (files already exist)
@@ -127,7 +137,7 @@ fn create_table_duplicate_name() {
 #[test]
 fn drop_table_basic() {
     let dir = temp_dir("drop_basic");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
     insert_record(&mut executor, "users", 25, "alice");
 
@@ -156,7 +166,7 @@ fn drop_table_basic() {
 #[test]
 fn drop_nonexistent_table() {
     let dir = temp_dir("drop_nonexist");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
 
     // Dropping a table that doesn't exist should succeed (files just don't exist)
     let result = executor
@@ -176,7 +186,7 @@ fn drop_nonexistent_table() {
 #[test]
 fn drop_and_recreate() {
     let dir = temp_dir("drop_recreate");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
     insert_record(&mut executor, "users", 25, "alice");
 
@@ -216,7 +226,7 @@ fn drop_and_recreate() {
 #[test]
 fn insert_returns_incrementing_ids() {
     let dir = temp_dir("insert_ids");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     let id0 = insert_record(&mut executor, "users", 25, "alice");
@@ -233,7 +243,7 @@ fn insert_returns_incrementing_ids() {
 #[test]
 fn insert_wrong_value_count() {
     let dir = temp_dir("insert_bad_count");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     // Table has 2 columns (age, name), but we provide 1 value
@@ -250,7 +260,7 @@ fn insert_wrong_value_count() {
 #[test]
 fn insert_type_mismatch() {
     let dir = temp_dir("insert_bad_type");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     // age is Int64 but we pass a string, name is Text but we pass an integer
@@ -267,7 +277,7 @@ fn insert_type_mismatch() {
 #[test]
 fn insert_and_verify_via_select() {
     let dir = temp_dir("insert_verify");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -301,7 +311,7 @@ fn insert_and_verify_via_select() {
 #[test]
 fn select_all_no_where() {
     let dir = temp_dir("select_all_no_where");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -336,7 +346,7 @@ fn select_all_no_where() {
 #[test]
 fn select_all_with_where() {
     let dir = temp_dir("select_all_where");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -371,7 +381,7 @@ fn select_all_with_where() {
 #[test]
 fn select_named_columns() {
     let dir = temp_dir("select_named");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -400,7 +410,7 @@ fn select_named_columns() {
 #[test]
 fn select_named_with_id() {
     let dir = temp_dir("select_named_id");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -430,7 +440,7 @@ fn select_named_with_id() {
 #[test]
 fn select_nonexistent_column_rejected() {
     let dir = temp_dir("select_bad_col");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     let result = executor.execute(Statement::Select {
@@ -447,7 +457,7 @@ fn select_nonexistent_column_rejected() {
 #[test]
 fn select_empty_table() {
     let dir = temp_dir("select_empty");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     let result = executor
@@ -472,7 +482,7 @@ fn select_empty_table() {
 #[test]
 fn select_where_by_id() {
     let dir = temp_dir("select_by_id");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -510,7 +520,7 @@ fn select_where_by_id() {
 #[test]
 fn delete_all_records() {
     let dir = temp_dir("delete_all");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -547,7 +557,7 @@ fn delete_all_records() {
 #[test]
 fn delete_with_where() {
     let dir = temp_dir("delete_where");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -596,7 +606,7 @@ fn delete_with_where() {
 #[test]
 fn update_all_records() {
     let dir = temp_dir("update_all");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -639,7 +649,7 @@ fn update_all_records() {
 #[test]
 fn update_with_where() {
     let dir = temp_dir("update_where");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -688,7 +698,7 @@ fn update_with_where() {
 #[test]
 fn update_multiple_columns() {
     let dir = temp_dir("update_multi_col");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -736,7 +746,7 @@ fn update_multiple_columns() {
 #[test]
 fn update_none_matching() {
     let dir = temp_dir("update_none");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -781,7 +791,7 @@ fn update_none_matching() {
 #[test]
 fn update_nonexistent_column_rejected() {
     let dir = temp_dir("update_bad_col");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -803,7 +813,7 @@ fn update_nonexistent_column_rejected() {
 #[test]
 fn update_by_id() {
     let dir = temp_dir("update_by_id");
-    let mut executor = Executor::new(dir.clone(), 100, 8, 1024, TEST_CACHE_SIZE, format!("{}/database.wal", dir)).unwrap();
+    let mut executor = Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
     create_test_table(&mut executor, "users");
 
     insert_record(&mut executor, "users", 25, "alice");
@@ -853,7 +863,7 @@ fn update_by_id() {
 
 fn new_executor(dir: &str) -> Executor {
     Executor::new(
-        dir.to_string(), 100, 8, 1024, TEST_CACHE_SIZE,
+        dir.to_string(), test_config(),
         format!("{}/database.wal", dir),
     ).unwrap()
 }
@@ -1112,6 +1122,168 @@ fn recovery_is_idempotent() {
         let mut executor = new_executor(&dir);
         let rows = select_all(&mut executor, "users");
         assert_eq!(rows.len(), 1, "recovery must be idempotent");
+    }
+
+    cleanup_dir(&dir);
+}
+
+// ══════════════════════════════════════════════════════════
+// Config SET/GET tests
+// ══════════════════════════════════════════════════════════
+
+#[test]
+fn get_single_config_value() {
+    let dir = temp_dir("get_single");
+    let mut executor = new_executor(&dir);
+
+    let result = executor.execute(Statement::Get { key: Some("cache_size".to_string()) }).unwrap();
+    match result {
+        ExecuteResult::ConfigValue { key, value } => {
+            assert_eq!(key, "cache_size");
+            assert_eq!(value, TEST_CACHE_SIZE.to_string());
+        }
+        _ => panic!("expected ConfigValue"),
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn get_all_config_values() {
+    let dir = temp_dir("get_all");
+    let mut executor = new_executor(&dir);
+
+    let result = executor.execute(Statement::Get { key: None }).unwrap();
+    match result {
+        ExecuteResult::ConfigAll { entries } => {
+            assert_eq!(entries.len(), 4);
+            assert!(entries.iter().any(|(k, _)| k == "cache_size"));
+            assert!(entries.iter().any(|(k, _)| k == "pages_per_file"));
+            assert!(entries.iter().any(|(k, _)| k == "page_kbytes"));
+            assert!(entries.iter().any(|(k, _)| k == "overflow_kbytes"));
+        }
+        _ => panic!("expected ConfigAll"),
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn get_unknown_key_errors() {
+    let dir = temp_dir("get_unknown");
+    let mut executor = new_executor(&dir);
+
+    assert!(executor.execute(Statement::Get { key: Some("nonexistent".to_string()) }).is_err());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn set_valid_config_value() {
+    let dir = temp_dir("set_valid");
+    let mut executor = new_executor(&dir);
+
+    let result = executor.execute(Statement::Set {
+        key: "cache_size".to_string(),
+        value: Literal::Integer(128),
+    }).unwrap();
+    assert!(matches!(result, ExecuteResult::ConfigUpdated));
+
+    // Verify value changed
+    let result = executor.execute(Statement::Get { key: Some("cache_size".to_string()) }).unwrap();
+    match result {
+        ExecuteResult::ConfigValue { value, .. } => assert_eq!(value, "128"),
+        _ => panic!("expected ConfigValue"),
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn set_unknown_key_errors() {
+    let dir = temp_dir("set_unknown");
+    let mut executor = new_executor(&dir);
+
+    assert!(executor.execute(Statement::Set {
+        key: "nonexistent".to_string(),
+        value: Literal::Integer(42),
+    }).is_err());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn set_non_integer_value_errors() {
+    let dir = temp_dir("set_non_int");
+    let mut executor = new_executor(&dir);
+
+    assert!(executor.execute(Statement::Set {
+        key: "cache_size".to_string(),
+        value: Literal::Str("hello".to_string()),
+    }).is_err());
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn set_persists_to_config_file() {
+    let dir = temp_dir("set_persist");
+    let mut executor = new_executor(&dir);
+
+    executor.execute(Statement::Set {
+        key: "cache_size".to_string(),
+        value: Literal::Integer(256),
+    }).unwrap();
+
+    // New executor loads config from file (like main.rs does)
+    let config = DatabaseConfig::read_from_file(&DatabaseConfig::config_path(&dir)).unwrap();
+    let mut executor2 = Executor::new(dir.clone(), config, format!("{}/database.wal", dir)).unwrap();
+    let result = executor2.execute(Statement::Get { key: Some("cache_size".to_string()) }).unwrap();
+    match result {
+        ExecuteResult::ConfigValue { value, .. } => assert_eq!(value, "256"),
+        _ => panic!("expected ConfigValue"),
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn set_multiple_keys() {
+    let dir = temp_dir("set_multi");
+    let mut executor = new_executor(&dir);
+
+    executor.execute(Statement::Set {
+        key: "cache_size".to_string(),
+        value: Literal::Integer(256),
+    }).unwrap();
+    executor.execute(Statement::Set {
+        key: "page_kbytes".to_string(),
+        value: Literal::Integer(16),
+    }).unwrap();
+
+    let result = executor.execute(Statement::Get { key: None }).unwrap();
+    match result {
+        ExecuteResult::ConfigAll { entries } => {
+            let cache = entries.iter().find(|(k, _)| k == "cache_size").unwrap();
+            assert_eq!(cache.1, "256");
+            let page = entries.iter().find(|(k, _)| k == "page_kbytes").unwrap();
+            assert_eq!(page.1, "16");
+        }
+        _ => panic!("expected ConfigAll"),
+    }
+
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn get_case_insensitive() {
+    let dir = temp_dir("get_case");
+    let mut executor = new_executor(&dir);
+
+    let result = executor.execute(Statement::Get { key: Some("CACHE_SIZE".to_string()) }).unwrap();
+    match result {
+        ExecuteResult::ConfigValue { value, .. } => assert_eq!(value, TEST_CACHE_SIZE.to_string()),
+        _ => panic!("expected ConfigValue"),
     }
 
     cleanup_dir(&dir);
