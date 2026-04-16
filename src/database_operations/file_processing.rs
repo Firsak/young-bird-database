@@ -1,3 +1,4 @@
+pub mod btree;
 pub mod buffer_pool;
 pub mod config;
 pub mod errors;
@@ -17,3 +18,6 @@ pub(crate) const INDEX_ENTRY_SIZE: usize = 20;
 pub(crate) const OVERFLOW_HEADER_SIZE: usize = 16;
 pub(crate) const OVERFLOW_REF_SIZE: usize = 16;
 pub(crate) const OVERFLOW_THRESHOLD: usize = 256;
+pub(crate) const BTREE_NODE_SIZE: usize = 8192;
+pub(crate) const BTREE_NODE_HEADER_SIZE: usize = 3;
+pub(crate) const BTREE_MAX_KEYS_PER_NODE: usize = 4;
