@@ -4,6 +4,8 @@
 // index of the current root node. Leaf nodes contain key → value pairs;
 // internal nodes contain keys + child indices for routing searches.
 
+use std::u64;
+
 use crate::database_operations::file_processing::{errors::DatabaseError, BTREE_MAX_KEYS_PER_NODE};
 
 use super::btree_node::BTreeNode;
@@ -72,6 +74,64 @@ impl BTree {
                 cursor_pos = self.nodes[cursor_pos].children[pos] as usize;
             }
         }
+    }
+
+    /// Returns all entries with keys in the inclusive range `[low, high]`.
+    ///
+    /// Descends to the leaf containing `low` using a path stack, then scans
+    /// forward across leaves collecting matching entries until a key exceeds
+    /// `high` or the tree is exhausted.
+    ///
+    /// # Arguments
+    /// * `low` — lower bound (inclusive). Use `u64::MIN` for unbounded start.
+    /// * `high` — upper bound (inclusive). Use `u64::MAX` for unbounded end.
+    ///
+    /// # Returns
+    /// A `Vec<(page_number, slot_index)>` of record locations, in key order.
+    /// Returns an empty `Vec` if no keys fall within the range.
+    pub fn range_scan(&self, low: u64, high: u64) -> Vec<(u64, u16)> {
+        let mut node = self.root;
+        let mut found_value_pos: Vec<(u64, u16)> = vec![];
+        let mut stack: Vec<(usize, usize)> = vec![];
+
+        while !self.nodes[node].is_leaf {
+            let pos = self.nodes[node].find_child_index(low);
+            stack.push((node, pos));
+            node = self.nodes[node].children[pos] as usize;
+        }
+
+        let mut search_pos = self.nodes[node].find_child_index(low);
+        if search_pos == self.nodes[node].keys.len() {
+            return found_value_pos;
+        }
+
+        while self.nodes[node].keys[search_pos] >= low && self.nodes[node].keys[search_pos] <= high
+        {
+            found_value_pos.push(self.nodes[node].values[search_pos]);
+            if search_pos < self.nodes[node].keys.len() - 1 {
+                search_pos += 1;
+            } else {
+                let mut no_more_leafs = true;
+                while let Some((parent_index, child_pos)) = stack.pop() {
+                    if child_pos < self.nodes[parent_index].children.len() - 1 {
+                        stack.push((parent_index, child_pos + 1));
+                        node = self.nodes[parent_index].children[(child_pos) + 1] as usize;
+                        no_more_leafs = false;
+                        break;
+                    }
+                }
+                if no_more_leafs {
+                    break;
+                }
+                while !self.nodes[node].is_leaf {
+                    stack.push((node, 0));
+                    node = self.nodes[node].children[0] as usize;
+                }
+                search_pos = 0;
+            }
+        }
+
+        found_value_pos
     }
 
     /// Deletes a key from the tree, rebalancing nodes as needed.
@@ -1194,6 +1254,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Range scan tests ──────────────────────────────────────
+
+    #[test]
+    fn range_scan_empty_tree() {
+        let tree = BTree::new();
+        let result = tree.range_scan(0, 100);
+        assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn range_scan_single_leaf_all_in_range() {
+        let mut tree = BTree::new();
+        for k in [10, 20, 30] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(10, 30);
+        assert_eq!(result, vec![(10, 0), (20, 0), (30, 0)]);
+    }
+
+    #[test]
+    fn range_scan_single_leaf_partial() {
+        let mut tree = BTree::new();
+        for k in [10, 20, 30, 40] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        // 15 and 35 don't exist — only 20 and 30 are in [15, 35]
+        let result = tree.range_scan(15, 35);
+        assert_eq!(result, vec![(20, 0), (30, 0)]);
+    }
+
+    #[test]
+    fn range_scan_no_matches() {
+        let mut tree = BTree::new();
+        for k in [10, 20, 30] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(50, 100);
+        assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn range_scan_single_key_match() {
+        // low == high, exact match on existing key
+        let mut tree = BTree::new();
+        for k in [10, 20, 30] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(20, 20);
+        assert_eq!(result, vec![(20, 0)]);
+    }
+
+    #[test]
+    fn range_scan_spans_two_leaves() {
+        // After 5 inserts: root([30]) → [10,20,30] | [40,50]
+        let mut tree = BTree::new();
+        for k in [10, 20, 30, 40, 50] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(20, 40);
+        assert_eq!(result, vec![(20, 0), (30, 0), (40, 0)]);
+    }
+
+    #[test]
+    fn range_scan_full_range() {
+        let mut tree = BTree::new();
+        for k in [10, 20, 30, 40, 50] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(u64::MIN, u64::MAX);
+        assert_eq!(result, vec![(10, 0), (20, 0), (30, 0), (40, 0), (50, 0)]);
+    }
+
+    #[test]
+    fn range_scan_three_level_tree() {
+        // 17 keys → 3-level tree
+        let mut tree = BTree::new();
+        for i in 1..=17 {
+            tree.insert(i * 10, (i * 10, 0)).unwrap();
+        }
+        // Range [50, 120] should return 50,60,70,80,90,100,110,120
+        let result = tree.range_scan(50, 120);
+        let expected: Vec<(u64, u16)> = (5..=12).map(|i| (i * 10, 0)).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn range_scan_last_key_in_leaf_included() {
+        // Tree: root([30]) → [10,20,30] | [40,50]
+        // Range [25,35] should include 30 (last key in left leaf within range)
+        let mut tree = BTree::new();
+        for k in [10, 20, 30, 40, 50] {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        let result = tree.range_scan(25, 35);
+        assert_eq!(result, vec![(30, 0)]);
+    }
+
+    #[test]
+    fn range_scan_returns_values_not_positions() {
+        // Values are (page_number, slot_index), NOT (node_index, position)
+        let mut tree = BTree::new();
+        tree.insert(10, (100, 5)).unwrap();
+        tree.insert(20, (200, 3)).unwrap();
+        tree.insert(30, (300, 7)).unwrap();
+        let result = tree.range_scan(10, 30);
+        assert_eq!(result, vec![(100, 5), (200, 3), (300, 7)]);
     }
 
     #[test]
