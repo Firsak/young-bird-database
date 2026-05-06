@@ -16,11 +16,10 @@ use crate::database_operations::file_processing::BTREE_NODE_SIZE;
 /// - **Internal**: stores keys + child pointers for routing searches.
 ///   `children` has one more entry than `keys` (n keys → n+1 children).
 ///   Everything < keys[0] goes to children[0], between keys[0]..keys[1] to children[1], etc.
+#[derive(Debug)]
 pub struct BTreeNode {
     /// true = leaf (has values), false = internal (has children)
     pub is_leaf: bool,
-    /// number of keys currently stored in this node
-    pub key_count: u16,
     /// sorted search keys (u64 column values or record IDs)
     pub keys: Vec<u64>,
     /// leaf only: record locations, values[i] corresponds to keys[i]
@@ -33,7 +32,6 @@ impl BTreeNode {
     pub fn new_leaf() -> Self {
         Self {
             is_leaf: true,
-            key_count: 0,
             keys: vec![],
             values: vec![],
             children: vec![],
@@ -43,11 +41,17 @@ impl BTreeNode {
     pub fn new_internal() -> Self {
         Self {
             is_leaf: false,
-            key_count: 0,
             keys: vec![],
             values: vec![],
             children: vec![],
         }
+    }
+
+    /// Number of keys in this node. Derived from `keys.len()` to avoid
+    /// dual-bookkeeping drift; the on-disk u16 metadata field is recomputed
+    /// from this at serialize time.
+    pub fn key_count(&self) -> u16 {
+        self.keys.len() as u16
     }
 
     /// Inserts a key-value pair into a leaf node in sorted order.
@@ -72,7 +76,6 @@ impl BTreeNode {
 
         self.values.insert(pos, value);
         self.keys.insert(pos, key);
-        self.key_count += 1;
         Ok(())
     }
 
@@ -126,7 +129,6 @@ impl BTreeNode {
 
         self.values.remove(pos);
         self.keys.remove(pos);
-        self.key_count -= 1;
         Ok(())
     }
 }
@@ -137,7 +139,7 @@ impl BinarySerde for BTreeNode {
     fn to_bytes(&self) -> Self::Output {
         let mut buffer = [0u8; BTREE_NODE_SIZE];
         buffer[0] = if self.is_leaf { 1u8 } else { 0u8 };
-        buffer[1..3].copy_from_slice(&self.key_count.to_le_bytes());
+        buffer[1..3].copy_from_slice(&(self.keys.len() as u16).to_le_bytes());
         for (keys_pos, key) in self.keys.iter().enumerate() {
             buffer[3 + keys_pos * 8..3 + (keys_pos + 1) * 8].copy_from_slice(&key.to_le_bytes());
         }
@@ -214,7 +216,6 @@ impl BinarySerde for BTreeNode {
 
         Ok(Self {
             is_leaf,
-            key_count,
             keys,
             values,
             children,
@@ -232,7 +233,7 @@ mod tests {
         let bytes = node.to_bytes();
         let restored = BTreeNode::from_bytes(&bytes).unwrap();
         assert!(restored.is_leaf);
-        assert_eq!(restored.key_count, 0);
+        assert_eq!(restored.key_count(), 0);
         assert!(restored.keys.is_empty());
         assert!(restored.values.is_empty());
         assert!(restored.children.is_empty());
@@ -244,7 +245,7 @@ mod tests {
         let bytes = node.to_bytes();
         let restored = BTreeNode::from_bytes(&bytes).unwrap();
         assert!(!restored.is_leaf);
-        assert_eq!(restored.key_count, 0);
+        assert_eq!(restored.key_count(), 0);
         assert!(restored.keys.is_empty());
         assert!(restored.values.is_empty());
         assert!(restored.children.is_empty());
@@ -254,7 +255,6 @@ mod tests {
     fn roundtrip_leaf_with_data() {
         let node = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![10, 20, 30],
             values: vec![(1, 0), (2, 3), (5, 1)],
             children: vec![],
@@ -262,7 +262,7 @@ mod tests {
         let bytes = node.to_bytes();
         let restored = BTreeNode::from_bytes(&bytes).unwrap();
         assert!(restored.is_leaf);
-        assert_eq!(restored.key_count, 3);
+        assert_eq!(restored.key_count(), 3);
         assert_eq!(restored.keys, vec![10, 20, 30]);
         assert_eq!(restored.values, vec![(1, 0), (2, 3), (5, 1)]);
         assert!(restored.children.is_empty());
@@ -272,7 +272,6 @@ mod tests {
     fn roundtrip_internal_with_data() {
         let node = BTreeNode {
             is_leaf: false,
-            key_count: 2,
             keys: vec![30, 60],
             values: vec![],
             children: vec![1, 2, 3],
@@ -280,7 +279,7 @@ mod tests {
         let bytes = node.to_bytes();
         let restored = BTreeNode::from_bytes(&bytes).unwrap();
         assert!(!restored.is_leaf);
-        assert_eq!(restored.key_count, 2);
+        assert_eq!(restored.key_count(), 2);
         assert_eq!(restored.keys, vec![30, 60]);
         assert!(restored.values.is_empty());
         assert_eq!(restored.children, vec![1, 2, 3]);

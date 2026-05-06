@@ -4,12 +4,13 @@
 // index of the current root node. Leaf nodes contain key → value pairs;
 // internal nodes contain keys + child indices for routing searches.
 
-use std::u64;
-
-use crate::database_operations::file_processing::{errors::DatabaseError, BTREE_MAX_KEYS_PER_NODE};
+use crate::database_operations::file_processing::{
+    btree::BTreeHeader, errors::DatabaseError, BTREE_MAX_KEYS_PER_NODE,
+};
 
 use super::btree_node::BTreeNode;
 
+#[derive(Debug)]
 pub struct BTree {
     nodes: Vec<BTreeNode>,
     root: usize,
@@ -29,6 +30,30 @@ impl BTree {
             nodes: vec![empty_leaf],
             root: 0,
             free_list: vec![],
+        }
+    }
+
+    pub fn get_nodes(&self) -> &Vec<BTreeNode> {
+        &self.nodes
+    }
+
+    pub fn get_root(&self) -> usize {
+        self.root
+    }
+
+    pub fn get_free_list(&self) -> &Vec<usize> {
+        &self.free_list
+    }
+
+    pub fn from_parts(header: BTreeHeader, nodes: Vec<BTreeNode>) -> Self {
+        Self {
+            nodes,
+            root: header.get_root_index() as usize,
+            free_list: header
+                .get_free_list()
+                .iter()
+                .map(|value| *value as usize)
+                .collect(),
         }
     }
 
@@ -149,7 +174,7 @@ impl BTree {
     ///
     /// # Errors
     /// Returns `InvalidArgument` if the key does not exist in any leaf.
-    fn delete(&mut self, key: u64) -> Result<(), DatabaseError> {
+    pub fn delete(&mut self, key: u64) -> Result<(), DatabaseError> {
         let mut node = self.root;
         let mut stack: Vec<(usize, usize)> = vec![];
         while !self.nodes[node].is_leaf {
@@ -174,11 +199,8 @@ impl BTree {
                 let key_to_move = previous_leaf.keys.pop().unwrap();
                 let value_to_move = previous_leaf.values.pop().unwrap();
                 let new_separation_key = *previous_leaf.keys.last().unwrap();
-                previous_leaf.key_count -= 1;
-
                 self.nodes[node].keys.insert(0, key_to_move);
                 self.nodes[node].values.insert(0, value_to_move);
-                self.nodes[node].key_count += 1;
                 self.nodes[parent_index].keys[child_pos - 1] = new_separation_key;
             } else if child_pos < self.nodes[parent_index].children.len() - 1
                 && self.nodes[self.nodes[parent_index].children[child_pos + 1] as usize]
@@ -191,11 +213,8 @@ impl BTree {
                 let key_to_move = next_leaf.keys.remove(0);
                 let value_to_move = next_leaf.values.remove(0);
                 let new_separation_key = key_to_move;
-                next_leaf.key_count -= 1;
-
                 self.nodes[node].keys.push(key_to_move);
                 self.nodes[node].values.push(value_to_move);
-                self.nodes[node].key_count += 1;
                 self.nodes[parent_index].keys[child_pos] = new_separation_key;
             } else {
                 let mut new_leaf = BTreeNode::new_leaf();
@@ -211,11 +230,9 @@ impl BTree {
                         self.nodes[node].values.clone(),
                     ]
                     .concat();
-                    new_leaf.key_count = new_leaf.keys.len() as u16;
                     self.nodes[node] = new_leaf;
 
                     self.nodes[parent_index].keys.remove(child_pos - 1);
-                    self.nodes[parent_index].key_count -= 1;
                     self.nodes[parent_index].children.remove(child_pos - 1);
                     self.free_list.push(neighbour_node as usize);
                 } else {
@@ -230,11 +247,9 @@ impl BTree {
                         self.nodes[neighbour_node as usize].values.clone(),
                     ]
                     .concat();
-                    new_leaf.key_count = new_leaf.keys.len() as u16;
                     self.nodes[node] = new_leaf;
 
                     self.nodes[parent_index].keys.remove(child_pos);
-                    self.nodes[parent_index].key_count -= 1;
                     self.nodes[parent_index].children.remove(child_pos + 1);
                     self.free_list.push(neighbour_node as usize);
                 }
@@ -245,8 +260,6 @@ impl BTree {
                         let mut new_leaf = BTreeNode::new_internal();
                         if child_pos > 0 {
                             let parent_key = self.nodes[parent_index].keys.remove(child_pos - 1);
-                            self.nodes[parent_index].key_count -= 1;
-
                             let neighbour_node = self.nodes[parent_index].children[child_pos - 1];
                             new_leaf.keys = [
                                 self.nodes[neighbour_node as usize].keys.clone(),
@@ -259,15 +272,11 @@ impl BTree {
                                 self.nodes[node].children.clone(),
                             ]
                             .concat();
-                            new_leaf.key_count = new_leaf.keys.len() as u16;
-
                             self.nodes[node] = new_leaf;
                             self.nodes[parent_index].children.remove(child_pos - 1);
                             self.free_list.push(neighbour_node as usize);
                         } else {
                             let parent_key = self.nodes[parent_index].keys.remove(child_pos);
-                            self.nodes[parent_index].key_count -= 1;
-
                             let neighbour_node = self.nodes[parent_index].children[child_pos + 1];
                             new_leaf.keys = [
                                 self.nodes[node].keys.clone(),
@@ -280,8 +289,6 @@ impl BTree {
                                 self.nodes[neighbour_node as usize].children.clone(),
                             ]
                             .concat();
-                            new_leaf.key_count = new_leaf.keys.len() as u16;
-
                             self.nodes[node] = new_leaf;
                             self.nodes[parent_index].children.remove(child_pos + 1);
                             self.free_list.push(neighbour_node as usize);
@@ -313,7 +320,7 @@ impl BTree {
     /// # Arguments
     /// * `key` — the search key to insert
     /// * `value` — record location as (page_number, slot_index)
-    fn insert(&mut self, key: u64, value: (u64, u16)) -> Result<(), DatabaseError> {
+    pub fn insert(&mut self, key: u64, value: (u64, u16)) -> Result<(), DatabaseError> {
         let mut node = self.root;
         let mut stack: Vec<(usize, usize)> = vec![];
         while !self.nodes[node].is_leaf {
@@ -331,8 +338,6 @@ impl BTree {
             let mut separator_key = self.nodes[node].keys[mid];
             new_node.keys = self.nodes[node].keys.split_off(mid + 1);
             new_node.values = self.nodes[node].values.split_off(mid + 1);
-            new_node.key_count = new_node.keys.len() as u16;
-            self.nodes[node].key_count = self.nodes[node].keys.len() as u16;
             let mut new_node_child_pos = self.alloc_node(new_node);
             let mut new_root_needed = true;
 
@@ -352,8 +357,6 @@ impl BTree {
                     new_node.keys = self.nodes[parent_index].keys.split_off(mid + 1);
                     self.nodes[parent_index].keys.pop();
                     new_node.children = self.nodes[parent_index].children.split_off(mid + 1);
-                    new_node.key_count = new_node.keys.len() as u16;
-                    self.nodes[parent_index].key_count = self.nodes[parent_index].keys.len() as u16;
                     new_node_child_pos = self.alloc_node(new_node);
                     new_root_needed = true;
                 } else {
@@ -363,7 +366,6 @@ impl BTree {
 
             if new_root_needed {
                 let mut new_root_node = BTreeNode::new_internal();
-                new_root_node.key_count = 1;
                 new_root_node.keys = vec![separator_key];
                 new_root_node.children = vec![self.root as u64, new_node_child_pos as u64];
                 let new_root_node_child_pos = self.alloc_node(new_root_node);
@@ -389,7 +391,6 @@ mod tests {
     fn search_single_leaf_hits_and_misses() {
         let leaf = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![10, 20, 30],
             values: vec![(1, 0), (2, 5), (3, 9)],
             children: vec![],
@@ -420,21 +421,18 @@ mod tests {
         // nodes[2] = root
         let leaf_a = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![10, 20, 30],
             values: vec![(1, 0), (2, 0), (3, 0)],
             children: vec![],
         };
         let leaf_b = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![40, 50],
             values: vec![(4, 0), (5, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![30],
             values: vec![],
             children: vec![0, 1],
@@ -478,49 +476,42 @@ mod tests {
         //   6: root
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 1,
             keys: vec![10],
             values: vec![(10, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![20, 30, 50],
             values: vec![(20, 0), (30, 0), (50, 0)],
             children: vec![],
         };
         let leaf2 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![60, 70],
             values: vec![(60, 0), (70, 0)],
             children: vec![],
         };
         let leaf3 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![80, 90],
             values: vec![(80, 0), (90, 0)],
             children: vec![],
         };
         let inner_l = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![20],
             values: vec![],
             children: vec![0, 1],
         };
         let inner_r = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![70],
             values: vec![],
             children: vec![2, 3],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![50],
             values: vec![],
             children: vec![4, 5],
@@ -780,21 +771,18 @@ mod tests {
         // Expected: L0=[5,10], L1=[20,30], root.keys=[10].
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![5, 10, 20],
             values: vec![(5, 0), (10, 0), (20, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![30, 40],
             values: vec![(30, 0), (40, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![25],
             values: vec![],
             children: vec![0, 1],
@@ -820,21 +808,18 @@ mod tests {
         // Expected: L0=[10,30], L1=[40,50], root.keys=[30].
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![10, 20],
             values: vec![(10, 0), (20, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 3,
             keys: vec![30, 40, 50],
             values: vec![(30, 0), (40, 0), (50, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![25],
             values: vec![],
             children: vec![0, 1],
@@ -862,28 +847,24 @@ mod tests {
         // merged leaf holds [10,20,50], all remaining keys searchable.
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![10, 20],
             values: vec![(10, 0), (20, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![30, 50],
             values: vec![(30, 0), (50, 0)],
             children: vec![],
         };
         let leaf2 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![60, 70],
             values: vec![(60, 0), (70, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 2,
             keys: vec![20, 50],
             values: vec![],
             children: vec![0, 1, 2],
@@ -911,28 +892,24 @@ mod tests {
         // parent has 1 key, 2 children, all remaining keys searchable.
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![10, 15],
             values: vec![(10, 0), (15, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![30, 40],
             values: vec![(30, 0), (40, 0)],
             children: vec![],
         };
         let leaf2 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![50, 60],
             values: vec![(50, 0), (60, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 2,
             keys: vec![15, 40],
             values: vec![],
             children: vec![0, 1, 2],
@@ -959,21 +936,18 @@ mod tests {
         // Expected: merged leaf [10,20,30] becomes the new root (leaf), tree height shrinks.
         let leaf0 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![10, 20],
             values: vec![(10, 0), (20, 0)],
             children: vec![],
         };
         let leaf1 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![30, 40],
             values: vec![(30, 0), (40, 0)],
             children: vec![],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![30],
             values: vec![],
             children: vec![0, 1],
@@ -1169,49 +1143,42 @@ mod tests {
         //                 if inner_L wasn't fixed, it has only 1 child → no sibling → panic
         let l0 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![10, 20],
             values: vec![(10, 0), (20, 0)],
             children: vec![],
         };
         let l1 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![30, 40],
             values: vec![(30, 0), (40, 0)],
             children: vec![],
         };
         let l2 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![50, 60],
             values: vec![(50, 0), (60, 0)],
             children: vec![],
         };
         let l3 = BTreeNode {
             is_leaf: true,
-            key_count: 2,
             keys: vec![70, 80],
             values: vec![(70, 0), (80, 0)],
             children: vec![],
         };
         let inner_l = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![20],
             values: vec![],
             children: vec![0, 1],
         };
         let inner_r = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![60],
             values: vec![],
             children: vec![2, 3],
         };
         let root = BTreeNode {
             is_leaf: false,
-            key_count: 1,
             keys: vec![40],
             values: vec![],
             children: vec![4, 5],
@@ -1242,7 +1209,7 @@ mod tests {
             if tree.free_list.contains(&i) {
                 continue;
             }
-            if !node.is_leaf && node.key_count > 0 {
+            if !node.is_leaf && node.key_count() > 0 {
                 assert_eq!(
                     node.children.len(),
                     node.keys.len() + 1,
@@ -1397,5 +1364,34 @@ mod tests {
         // not to the stale tail dummy at slot 2.
         let root = &tree.nodes[tree.root];
         assert_eq!(root.children[1], 1);
+    }
+
+    #[test]
+    fn delete_ascending_after_ascending_inserts_no_panic() {
+        // Insert 1..=40 then delete 1..=40 in the same order.
+        // Triggers cascading left-side leaf and internal merges as the leftmost
+        // path of the tree keeps underflowing. Pre-fix this panicked with
+        // "subtract with overflow" on `key_count -= 1` because keys.len() and
+        // key_count diverged during internal-merge propagation.
+        let mut tree = BTree::new();
+        for k in 1u64..=40 {
+            tree.insert(k, (k, 0)).unwrap();
+        }
+        for k in 1u64..=40 {
+            tree.delete(k).unwrap();
+            assert_eq!(tree.search(k), None, "key {} still found", k);
+        }
+        // After all deletes, every surviving slot's keys.len() must equal key_count.
+        for (i, node) in tree.nodes.iter().enumerate() {
+            if tree.free_list.contains(&i) {
+                continue;
+            }
+            assert_eq!(
+                node.keys.len() as u16,
+                node.key_count(),
+                "node {} keys.len/key_count diverged",
+                i
+            );
+        }
     }
 }

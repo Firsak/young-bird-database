@@ -8,6 +8,7 @@
 // The executor owns configuration (base_path, pages_per_file, page_kbytes, overflow_kbytes)
 // and opens/creates tables as needed per statement.
 
+use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
 
 use crate::database_operations::file_processing::config::DatabaseConfig;
@@ -432,10 +433,17 @@ impl Executor {
             SelectColumns::All => column_defs.len() + 1,
             SelectColumns::Named(names) => names.len(),
         };
-        let records = table.scan_records(|record_id, values| match &where_clause {
-            None => true,
-            Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
-        })?;
+        let id_range = match where_clause.as_ref() {
+            Some(expr) => classify_id_range(expr),
+            None => None,
+        };
+        let records = match id_range {
+            Some((low, high)) => table.scan_records_by_id_range(low, high)?,
+            None => table.scan_records(|record_id, values| match &where_clause {
+                Some(expr) => evaluate_expr(expr, record_id, values, &column_defs).unwrap_or(false),
+                None => true,
+            })?,
+        };
         let rows = records
             .iter()
             .map(|record| {
@@ -668,7 +676,8 @@ impl Executor {
         };
 
         self.config.set(&key, num as usize)?;
-        self.config.write_to_file(&DatabaseConfig::config_path(&self.base_path))?;
+        self.config
+            .write_to_file(&DatabaseConfig::config_path(&self.base_path))?;
 
         Ok(ExecuteResult::ConfigUpdated)
     }
@@ -798,6 +807,70 @@ impl Executor {
 /// - `values`: this record's column values
 /// - `column_defs`: table schema (maps column names → indices)
 ///
+/// Detects whether a WHERE expression is a simple range over `id`
+/// that the B-tree can answer directly.
+///
+/// Returns `Some((low, high))` (inclusive bounds) if the expression
+/// reduces to an id-range, otherwise `None` (caller falls back to a
+/// full scan with `evaluate_expr`).
+fn classify_id_range(expr: &Expr) -> Option<(u64, u64)> {
+    // TODO(human): inspect `expr` and return Some((low, high)) when it
+    //   is a simple id-range, None otherwise.
+    //
+    // Cases to handle for v0 (return None for everything else):
+    //   - `id = N`              → Some((N, N))
+    //   - `id > N`              → Some((N + 1, u64::MAX))   (saturating)
+    //   - `id >= N`             → Some((N, u64::MAX))
+    //   - `id < N`              → Some((0, N - 1))          (saturating)
+    //   - `id <= N`             → Some((0, N))
+    //   - `id >= A AND id <= B` → Some((A, B))
+    //
+    // Hints:
+    //   - Match on `Expr::Comparison { column, op, value }` first.
+    //   - Only optimize when `column == "id"` and `value` is
+    //     `Literal::Integer(n)` (ignore NegativeInteger/Str/etc).
+    //   - For AND, recurse on both sides and intersect the ranges
+    //     (max of lows, min of highs); return None if either side
+    //     is None or the ranges don't overlap.
+    //   - OR / NOT / non-id columns / non-Integer literals → None.
+    match expr {
+        Expr::Comparison { column, op, value } => {
+            if column != "id" {
+                return None;
+            }
+            let u_value = match value {
+                Literal::Integer(v) => *v,
+                _ => return None,
+            };
+            match op {
+                CompOp::Eq => Some((u_value, u_value)),
+                CompOp::Gt => Some((u_value.saturating_add(1), u64::MAX)),
+                CompOp::Ge => Some((u_value, u64::MAX)),
+                CompOp::Lt => Some((0, u_value.saturating_sub(1))),
+                CompOp::Le => Some((0, u_value)),
+                _ => None,
+            }
+        }
+        Expr::And(left_expt, right_expr) => {
+            let left = classify_id_range(left_expt)?;
+            let right = classify_id_range(right_expr)?;
+
+            let (left_min, left_max) = left;
+            let (right_min, right_max) = right;
+
+            let new_min = max(left_min, right_min);
+            let new_max = min(left_max, right_max);
+
+            if new_min > new_max {
+                None
+            } else {
+                Some((new_min, new_max))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// # Returns
 /// `true` if the record matches the expression, `false` otherwise.
 ///

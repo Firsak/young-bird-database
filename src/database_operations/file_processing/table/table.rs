@@ -1,6 +1,5 @@
-use std::usize;
-
 use super::table_header::TableHeader;
+use crate::database_operations::file_processing::btree::{read_btree, write_btree, BTree};
 use crate::database_operations::file_processing::buffer_pool::buffer_pool::BufferPool;
 use crate::database_operations::file_processing::buffer_pool::cached_page::CachedPage;
 use crate::database_operations::file_processing::errors::DatabaseError;
@@ -41,6 +40,7 @@ pub struct Table {
     base_path: String,
     header: TableHeader,
     index: HashIndex,
+    btree: BTree,
     overflow_reverse: OverflowReverseIndex,
     cache: BufferPool,
 }
@@ -59,6 +59,7 @@ impl Table {
         base_path: String,
         header: TableHeader,
         index: HashIndex,
+        btree: BTree,
         overflow_reverse: OverflowReverseIndex,
         cache_size: usize,
     ) -> Self {
@@ -67,6 +68,7 @@ impl Table {
             base_path,
             header,
             index,
+            btree,
             overflow_reverse,
             cache: BufferPool::new(cache_size),
         }
@@ -91,6 +93,11 @@ impl Table {
         format!("{}/{}.idx", self.base_path, self.name)
     }
 
+    /// Returns the path to this table's .btree file (primary key B-tree).
+    fn btree_path(&self) -> String {
+        format!("{}/{}.btree", self.base_path, self.name)
+    }
+
     /// Returns the path to an .overflow file by file index.
     fn overflow_path(&self, file_index: u32) -> String {
         format!("{}/{}_{}.overflow", self.base_path, self.name, file_index)
@@ -104,6 +111,11 @@ impl Table {
     /// Persists the current in-memory index to the .idx file.
     fn save_index(&self) -> Result<(), DatabaseError> {
         write_index(&self.idx_path(), &self.index)
+    }
+
+    /// Persists the current in-memory B-tree to the .btree file.
+    fn save_btree(&self) -> Result<(), DatabaseError> {
+        write_btree(&self.btree_path(), &self.btree)
     }
 
     /// Ensures a page is loaded into the buffer pool. On cache miss, reads the
@@ -270,12 +282,15 @@ impl Table {
         let header = read_table_header(&meta_path)?;
         let hash_index_path = format!("{}/{}.idx", base_path, name);
         let index = read_index(&hash_index_path)?;
+        let btree_path = format!("{}/{}.btree", base_path, name);
+        let btree = read_btree(&btree_path)?;
         let overflow_reverse = OverflowReverseIndex::new();
         let mut table = Self {
             name,
             base_path,
             header,
             index,
+            btree,
             overflow_reverse,
             cache: BufferPool::new(cache_size),
         };
@@ -348,18 +363,21 @@ impl Table {
             columns,
         );
         let index = HashIndex::new(16);
+        let btree = BTree::new();
         let overflow_reverse = OverflowReverseIndex::new();
         let table = Table::new(
             name,
             base_path,
             table_header,
             index,
+            btree,
             overflow_reverse,
             cache_size,
         );
         table.save_header()?;
         write_new_page(&table.dat_path(0), 0, page_kbytes)?;
         table.save_index()?;
+        table.save_btree()?;
         Ok(table)
     }
 
@@ -687,6 +705,10 @@ impl Table {
             .insert_entry(record_id, target_page_number, new_slot_index)?;
         self.save_index()?;
 
+        self.btree
+            .insert(record_id, (target_page_number, new_slot_index))?;
+        self.save_btree()?;
+
         Ok(())
     }
 
@@ -718,6 +740,53 @@ impl Table {
 
         self.resolve_overflow_to_text(record_content.get_content_mut())?;
         Ok(record_content)
+    }
+
+    /// Returns all records whose `record_id` lies in `[low, high]` (inclusive).
+    /// Uses the B-tree to locate (page, slot) coordinates without scanning
+    /// every page. Output is in B-tree order (ascending by record_id).
+    ///
+    /// # Arguments
+    /// * `low` — inclusive lower bound on record_id
+    /// * `high` — inclusive upper bound on record_id
+    ///
+    /// # Errors
+    /// * `Io` - Page read failure
+    pub fn scan_records_by_id_range(
+        &mut self,
+        low: u64,
+        high: u64,
+    ) -> Result<Vec<(u64, PageRecordContent)>, DatabaseError> {
+        // TODO(human): build the result list using the B-tree.
+        //   1. Ask the B-tree for matching coordinates:
+        //        let candidates = self.btree.range_scan(low, high);
+        //      `candidates` is `Vec<(u64, u16)>` = (page_number, slot_index) pairs.
+        //   2. Allocate an output Vec<(u64, PageRecordContent)>.
+        //   3. For each (page_number, slot_index) in candidates:
+        //        a. let page = self.get_cached_page(page_number)?;
+        //        b. record_id = page.get_records_metadata()[slot_index as usize].get_id();
+        //        c. content = page
+        //               .get_record_content_by_slot_index(slot_index as usize)
+        //               .clone();
+        //        d. self.resolve_overflow_to_text(content.get_content_mut())?;
+        //        e. push (record_id, content) onto output.
+        //   4. Return Ok(output).
+
+        let found_records = self.btree.range_scan(low, high);
+
+        let mut output: Vec<(u64, PageRecordContent)> = Vec::with_capacity(found_records.len());
+
+        for (page_number, slot_index) in found_records {
+            let page = self.get_cached_page(page_number)?;
+            let record_id = page.get_records_metadata()[slot_index as usize].get_id();
+            let mut record_content = page
+                .get_record_content_by_slot_index(slot_index as usize)
+                .clone();
+            self.resolve_overflow_to_text(record_content.get_content_mut())?;
+            output.push((record_id, record_content));
+        }
+
+        Ok(output)
     }
 
     /// Scans all records page-by-page, returning those that pass the filter.
@@ -830,6 +899,10 @@ impl Table {
 
         self.index.remove_entry(record_id)?;
         self.save_index()?;
+
+        self.btree.delete(record_id)?;
+        self.save_btree()?;
+
         Ok(())
     }
 
@@ -942,6 +1015,9 @@ impl Table {
             PageHeader::new(target_page_num, 0, 0, (page_size - HEADER_SIZE) as u32, 0);
         let mut target_page = Page::new(new_page_header, vec![], vec![]);
 
+        let new_btree = BTree::new();
+        self.btree = new_btree;
+
         for process_page_num in 0..total_pages {
             let resolved_filename_to_process = self.resolve_file(process_page_num)?;
             let process_page = read_page(
@@ -991,10 +1067,16 @@ impl Table {
                         - PAGE_RECORD_METADATA_SIZE as u32
                         - record_metadata.get_content_size(),
                 );
+
                 self.index.update_entry(
                     record_metadata.get_id(),
                     target_page_num,
                     target_page.header.get_records_count() - 1,
+                )?;
+
+                self.btree.insert(
+                    new_record_metadata.get_id(),
+                    (target_page_num, target_page.header.get_records_count() - 1),
                 )?;
             }
         }
@@ -1014,6 +1096,7 @@ impl Table {
         self.header.update_pages_count(new_pages_count);
         self.save_header()?;
         self.save_index()?;
+        self.save_btree()?;
 
         self.cache = BufferPool::new(self.cache.capacity());
 
@@ -1218,6 +1301,7 @@ mod tests {
                 vec![ColumnDef::new(ColumnTypes::Int64, false, "id".to_string())],
             ),
             HashIndex::new(16),
+            BTree::new(),
             OverflowReverseIndex::new(),
             16,
         )

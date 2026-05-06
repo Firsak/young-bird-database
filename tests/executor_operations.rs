@@ -1288,3 +1288,309 @@ fn get_case_insensitive() {
 
     cleanup_dir(&dir);
 }
+
+// ══════════════════════════════════════════════════════════
+// SELECT id-range optimization (B-tree fast path)
+// ══════════════════════════════════════════════════════════
+// These tests exercise `classify_id_range` + `scan_records_by_id_range`.
+// They verify the result set matches what a full scan would produce —
+// the executor decides which path to use, but the rows must agree.
+
+/// Helper: extract row count + ids from a SELECT result.
+fn ids_from_result(result: ExecuteResult) -> Vec<u64> {
+    match result {
+        ExecuteResult::Selected { rows, .. } => rows
+            .iter()
+            .map(|row| match row[0] {
+                ContentTypes::UInt64(id) => id,
+                _ => panic!("expected UInt64 id"),
+            })
+            .collect(),
+        _ => panic!("expected Selected"),
+    }
+}
+
+/// Helper: insert N records named "row_i", returns their assigned ids.
+fn seed_rows(executor: &mut Executor, table: &str, n: u64) -> Vec<u64> {
+    (0..n)
+        .map(|i| insert_record(executor, table, i, &format!("row_{}", i)))
+        .collect()
+}
+
+#[test]
+fn id_range_eq_returns_single_row() {
+    let dir = temp_dir("id_range_eq");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    let ids = seed_rows(&mut executor, "users", 5);
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "id".to_string(),
+                op: CompOp::Eq,
+                value: Literal::Integer(ids[2]),
+            }),
+        })
+        .unwrap();
+
+    assert_eq!(ids_from_result(result), vec![ids[2]]);
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_ge_and_le_returns_subset() {
+    let dir = temp_dir("id_range_ge_le");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    let ids = seed_rows(&mut executor, "users", 10);
+
+    let low = ids[3];
+    let high = ids[7];
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::And(
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Ge,
+                    value: Literal::Integer(low),
+                }),
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Le,
+                    value: Literal::Integer(high),
+                }),
+            )),
+        })
+        .unwrap();
+
+    let mut got = ids_from_result(result);
+    got.sort();
+    assert_eq!(got, ids[3..=7].to_vec());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_gt_excludes_boundary() {
+    let dir = temp_dir("id_range_gt");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    let ids = seed_rows(&mut executor, "users", 5);
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "id".to_string(),
+                op: CompOp::Gt,
+                value: Literal::Integer(ids[2]),
+            }),
+        })
+        .unwrap();
+
+    let mut got = ids_from_result(result);
+    got.sort();
+    assert_eq!(got, ids[3..].to_vec());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_lt_excludes_boundary() {
+    let dir = temp_dir("id_range_lt");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    let ids = seed_rows(&mut executor, "users", 5);
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "id".to_string(),
+                op: CompOp::Lt,
+                value: Literal::Integer(ids[2]),
+            }),
+        })
+        .unwrap();
+
+    let mut got = ids_from_result(result);
+    got.sort();
+    assert_eq!(got, ids[..2].to_vec());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_empty_when_low_above_high() {
+    let dir = temp_dir("id_range_empty");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    seed_rows(&mut executor, "users", 5);
+
+    // id >= 100 AND id <= 200 — beyond all assigned ids.
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::And(
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Ge,
+                    value: Literal::Integer(100),
+                }),
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Le,
+                    value: Literal::Integer(200),
+                }),
+            )),
+        })
+        .unwrap();
+
+    assert_eq!(ids_from_result(result), Vec::<u64>::new());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_intersection_yields_no_overlap() {
+    // id <= 1 AND id >= 3 → low > high after intersect → classifier
+    // returns None → falls back to scan, which also yields no rows.
+    let dir = temp_dir("id_range_no_overlap");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    seed_rows(&mut executor, "users", 5);
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::And(
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Le,
+                    value: Literal::Integer(1),
+                }),
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Ge,
+                    value: Literal::Integer(3),
+                }),
+            )),
+        })
+        .unwrap();
+
+    assert_eq!(ids_from_result(result), Vec::<u64>::new());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_eq_missing_id_returns_empty() {
+    let dir = temp_dir("id_range_missing");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    seed_rows(&mut executor, "users", 3);
+
+    // delete row 1 → gap in id space
+    executor
+        .execute(Statement::Delete {
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "id".to_string(),
+                op: CompOp::Eq,
+                value: Literal::Integer(1),
+            }),
+        })
+        .unwrap();
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "id".to_string(),
+                op: CompOp::Eq,
+                value: Literal::Integer(1),
+            }),
+        })
+        .unwrap();
+
+    assert_eq!(ids_from_result(result), Vec::<u64>::new());
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn non_id_column_falls_back_to_scan() {
+    // WHERE on a non-id column is not an id-range — classifier returns
+    // None and the executor uses scan_records + evaluate_expr. Result
+    // must still be correct.
+    let dir = temp_dir("id_range_non_id");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    insert_record(&mut executor, "users", 25, "alice");
+    insert_record(&mut executor, "users", 30, "bob");
+    insert_record(&mut executor, "users", 25, "carol");
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Comparison {
+                column: "age".to_string(),
+                op: CompOp::Eq,
+                value: Literal::Integer(25),
+            }),
+        })
+        .unwrap();
+
+    let mut got = ids_from_result(result);
+    got.sort();
+    assert_eq!(got, vec![0, 2]);
+    cleanup_dir(&dir);
+}
+
+#[test]
+fn id_range_or_falls_back_to_scan() {
+    // OR is not handled by the classifier — falls back to scan. Verify
+    // the result set is still correct.
+    let dir = temp_dir("id_range_or");
+    let mut executor =
+        Executor::new(dir.clone(), test_config(), format!("{}/database.wal", dir)).unwrap();
+    create_test_table(&mut executor, "users");
+    seed_rows(&mut executor, "users", 5);
+
+    let result = executor
+        .execute(Statement::Select {
+            columns: SelectColumns::All,
+            table: "users".to_string(),
+            where_clause: Some(Expr::Or(
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Eq,
+                    value: Literal::Integer(0),
+                }),
+                Box::new(Expr::Comparison {
+                    column: "id".to_string(),
+                    op: CompOp::Eq,
+                    value: Literal::Integer(4),
+                }),
+            )),
+        })
+        .unwrap();
+
+    let mut got = ids_from_result(result);
+    got.sort();
+    assert_eq!(got, vec![0, 4]);
+    cleanup_dir(&dir);
+}

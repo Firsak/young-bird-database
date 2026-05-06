@@ -9,10 +9,13 @@ A page-based database engine built from scratch in Rust with zero external depen
 - **Multi-file tables** — schema in `.meta`, pages in `_N.dat` files, hash index in `.idx`
 - **Overflow text** — large text values stored in separate `.overflow` files with fragmentation tracking and compaction
 - **Hash index** with open addressing and linear probing for O(1) record lookup by ID
+- **B-tree index** on `record_id` — search, insert with node splitting, delete with merge/rebalancing, ordered range scans, persisted to `.btree` files with a fixed 8192-byte header block
 - **Buffer pool cache** — LRU page cache with write-back dirty tracking, configurable size via `--cache-size`
 - **Inter-page compaction** — streaming two-page algorithm with O(page_size) memory
 - **Full SQL pipeline** — Lexer → Parser (recursive descent) → Executor with WHERE clause support (AND/OR/NOT with precedence)
+- **Query planner v0** — recognizes id-range WHERE clauses (`id =`, `<`, `<=`, `>`, `>=`, AND of bounds) and dispatches B-tree fast-path; OR / NOT / non-id columns fall back to full scan
 - **Transaction support** — `BEGIN`/`COMMIT`/`ROLLBACK` with write-ahead log (WAL); crash recovery replays committed transactions on startup
+- **Persistent runtime config** — `database.conf` text file storing `cache_size`, `pages_per_file`, `page_kbytes`, `overflow_kbytes`; readable/writable from SQL via `GET`/`SET`
 - **Interactive REPL** and single-command CLI mode
 
 ## Quick Start
@@ -61,6 +64,9 @@ DELETE FROM t WHERE age < 18
 BEGIN
 COMMIT
 ROLLBACK
+GET CACHE_SIZE
+GET ALL
+SET CACHE_SIZE = 128
 ```
 
 Supported types: `BOOLEAN`, `TEXT`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`, `FLOAT32`, `FLOAT64`
@@ -69,10 +75,13 @@ Supported types: `BOOLEAN`, `TEXT`, `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, 
 
 ```
 {base_path}/
+├── database.conf        ← Persistent runtime config (cache_size, pages_per_file, etc.)
+├── database.wal         ← Write-ahead log (truncated at COMMIT)
 ├── {table}.meta         ← Schema (columns, types, page config)
 ├── {table}_0.dat        ← Pages 0..999
 ├── {table}_1.dat        ← Pages 1000..1999
 ├── {table}.idx          ← Hash index (record_id → page, slot)
+├── {table}.btree        ← B-tree index on record_id (range queries)
 ├── {table}_0.overflow   ← Overflow text for large values
 └── {table}_1.overflow   ← More overflow files as needed
 ```
@@ -104,6 +113,13 @@ src/
       errors.rs      # DatabaseError enum
       types.rs       # ContentTypes, ColumnTypes enums + serialization
       traits.rs      # BinarySerde, ReadWrite traits
+      config.rs      # DatabaseConfig (persistent runtime settings, database.conf)
+      btree/
+        btree_node.rs    # BTreeNode (leaf + internal); key_count is a method
+        btree.rs         # BTree (search, insert with split, delete with merge/rebalance, range_scan)
+        btree_header.rs  # BTreeHeader (24 bytes fixed + free_list)
+        reading.rs       # read_btree (.btree file)
+        writing.rs       # write_btree (.btree file, fixed 8192-byte header block)
       buffer_pool/
         cached_page.rs   # CachedPage (Page + dirty flag)
         buffer_pool.rs   # BufferPool (LRU cache, HashMap + VecDeque)
@@ -145,17 +161,18 @@ src/
 tests/
   page_operations.rs       # 17 page-level I/O tests
   table_operations.rs      # 87 table-level operation tests
-  index_operations.rs      # 4 index file I/O tests
+  index_operations.rs      # 4 hash index file I/O tests
   overflow_operations.rs   # 13 overflow file I/O tests
+  btree_operations.rs      # 9 B-tree file I/O tests
   sql_lexer.rs             # 13 SQL lexer tests
-  executor_operations.rs   # 37 SQL executor + transaction tests
+  executor_operations.rs   # 55 SQL executor + transaction + id-range tests
   wal_operations.rs        # 7 WAL reader/writer tests
   cli_operations.rs        # 8 CLI integration tests
 ```
 
 ## Test Coverage
 
-346 tests total (160 unit + 186 integration) covering serialization, page I/O, table CRUD, buffer pool caching, overflow text, index operations, SQL parsing, query execution, transactions, crash recovery, and CLI behavior.
+424 tests total (211 unit + 213 integration) covering serialization, page I/O, table CRUD, buffer pool caching, overflow text, hash and B-tree indexes, SQL parsing, query execution with id-range planner, transactions, crash recovery, and CLI behavior.
 
 ```bash
 cargo test
@@ -163,7 +180,7 @@ cargo test
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–7 and 6.1–6.3 are complete. Next up: B-Tree index (Phase 8) or SQL SET/GET config commands (Phase 6.4).
+See [ROADMAP.md](ROADMAP.md) for the full development plan. Phases 1–7, 6.1–6.4, 8.1–8.6, and 8.8 v0 are complete. Next up: secondary B-tree indexes on arbitrary columns (Phase 8.7), then concurrency (Phase 9).
 
 ## License
 

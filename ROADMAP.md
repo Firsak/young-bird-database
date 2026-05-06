@@ -65,20 +65,35 @@
 - Auto-transaction for single statements without explicit BEGIN
 - Crash recovery: replay committed transactions idempotently on startup, discard incomplete ones
 
-## Planned
-
-### Phase 6: Advanced Features (continued)
-- SQL SET/GET commands for runtime config (e.g. cache_size)
+### Phase 6.4: Persistent Runtime Config
+- DatabaseConfig struct with text-file persistence (`database.conf`)
+- `GET <key>`, `GET ALL`, `SET <key> = <value>` SQL statements through full pipeline (token / AST / parser / executor)
+- CLI override support; executor reads from centralized config
 
 ### Phase 8: B-Tree Index
-- B-tree node struct (leaf + internal nodes, BinarySerde)
-- B-tree search (single key lookup)
-- B-tree insertion (with node splitting)
-- B-tree deletion (with node merging/rebalancing)
-- Range scan (return all entries where key is in [low, high])
-- B-tree file I/O (persist to .btree file)
-- Secondary index support (index on any column, not just record_id)
-- Query planner integration (WHERE clauses use B-tree when available)
+- BTreeNode (leaf + internal) with BinarySerde; `key_count` derived from `keys.len()` (no dual-bookkeeping field)
+- BTree struct: search, insert with leaf and internal node splitting, delete with borrow / merge / rebalance, range_scan with stack-based leaf traversal
+- B-tree file I/O: BTreeHeader (root, node_count, free_list) in a fixed 8192-byte reserved header block; nodes at predictable offsets `BTREE_HEADER_BLOCK_SIZE + i * BTREE_NODE_SIZE`; free slots written as zero bytes and read as placeholder leaves
+- Table integration: `.btree` index on `record_id` persisted alongside `.idx` on every insert / delete; `compact_table` rebuilds the B-tree from active records
+- Query planner v0: `classify_id_range(expr)` recognizes id-range WHERE clauses (`id =`, `<`, `<=`, `>`, `>=`, AND of two id-bounds); executor dispatches `Table::scan_records_by_id_range` when applicable, falls back to `scan_records` + `evaluate_expr` for OR / NOT / non-id columns
+
+## Planned
+
+### Phase 8.7: Secondary B-Tree Indexes
+- B-tree on arbitrary columns (not just `record_id`)
+- Multiple `.btree` files per table, one per indexed column
+- Column-aware key extraction at insert / delete / update time
+
+### Phase 8.8 v1+: Query Planner Extensions
+- Use Phase 8.7 indexes for non-id WHERE columns
+- DNF expansion for OR (each disjunct → separate index lookup, union results)
+- Cost model (when to skip an index even if available)
+
+### Phase 9: Concurrency Control
+- Page-level locking (read / write locks on cached pages)
+- MVCC or lock-based concurrency (design decision TBD)
+- Concurrent access tests
+- Per-object WAL records (replace table-op replay with finer-grained log entries to support concurrent transactions)
 
 ## Dependency Chain
 
@@ -93,5 +108,9 @@ Page Layer (1)
   └─→ Overflow Text (6.1) — large text in separate files with compaction
   └─→ Page Caching (6.2) — LRU buffer pool with write-back dirty tracking
   └─→ Transactions / WAL (6.3) — log before mutate, COMMIT flushes, ROLLBACK discards
-  └─→ Advanced Features (6.4+) — SQL SET/GET config, concurrency control
+  └─→ Persistent Config (6.4) — database.conf + SQL GET/SET
+  └─→ B-Tree Index (8) — depends on Page (1), Table (2), Hash Index (4); persisted on every mutation
+        └─→ Query Planner v0 (8.8) — depends on B-Tree + SQL (7); id-range fast-path
+        └─→ Secondary Indexes (8.7) — depends on Table API for column access
+  └─→ Concurrency (9) — depends on Buffer Pool (6.2), WAL (6.3), and B-Tree (8)
 ```

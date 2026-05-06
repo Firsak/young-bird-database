@@ -21,3 +21,4 @@ pub(crate) const OVERFLOW_THRESHOLD: usize = 256;
 pub(crate) const BTREE_NODE_SIZE: usize = 8192;
 pub(crate) const BTREE_NODE_HEADER_SIZE: usize = 3;
 pub(crate) const BTREE_MAX_KEYS_PER_NODE: usize = 4;
+pub(crate) const BTREE_HEADER_BLOCK_SIZE: usize = 8192;

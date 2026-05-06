@@ -23,6 +23,21 @@
 
 use crate::database_operations::file_processing::traits::BinarySerde;
 
+// Index maintenance policy: only user-level table operations are logged here.
+// Indexes (hash index, B-tree) are rebuilt as side effects of replaying those
+// operations — `Table::insert_record` / `delete_record` / `update_record`
+// internally sync every attached index, so one table WAL entry re-populates
+// them all. This relies on commit-time flushing: pages + every index file land
+// on disk together, so recovery never sees a split state between an index and
+// its backing pages.
+//
+// Future (Phase 9 — concurrency): per-object WAL records + per-object LSN
+// tracking. Lazy page eviction and per-index dirty schedules mean pages may
+// flush at different times than their indexes. Then we add operations like
+// `BtreeInsert { index: String, key: u64, value: (u64, u16) }` and replay only
+// the index ops whose LSN postdates the last persisted state of that object.
+// Not needed until we introduce independent flush schedules.
+
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum WalOperation {
     Begin = 0,
